@@ -62,6 +62,35 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         client.restore_session(cookies)
         return client
 
+    def _fetch_device_info(self) -> dict[str, Any]:
+        """Получить текущий статус счётчиков из API (синхронно)."""
+        cfg = self._get_effective_config()
+        try:
+            client = self._make_client(cfg)
+        except UpdateFailed as err:
+            raise ConfigEntryAuthFailed(str(err)) from err
+
+        try:
+            device_map = client.get_device_info(cfg[CONF_PAYCODE], cfg[CONF_FLAT])
+        except MosRuAuthError as err:
+            raise ConfigEntryAuthFailed(str(err)) from err
+        except MosRuApiError as err:
+            raise UpdateFailed(f"Ошибка получения статуса: {err}") from err
+
+        cold_info = device_map.get(cfg.get(CONF_COLD_ID, ""), {})
+        hot_info  = device_map.get(cfg.get(CONF_HOT_ID, ""), {})
+
+        return {
+            "cold_current":          cold_info.get("current_reading"),
+            "hot_current":           hot_info.get("current_reading"),
+            "cold_readonly":         cold_info.get("readonly", True),
+            "hot_readonly":          hot_info.get("readonly", True),
+            "cold_inspection_date":  cold_info.get("inspection_date"),
+            "hot_inspection_date":   hot_info.get("inspection_date"),
+            "cold_inspection_status": cold_info.get("inspection_status", ""),
+            "hot_inspection_status":  hot_info.get("inspection_status", ""),
+        }
+
     async def async_submit_now(self) -> dict[str, Any]:
         """Отправить показания прямо сейчас (вызывается из button.py)."""
         return await self.hass.async_add_executor_job(self._submit)
@@ -106,23 +135,37 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         }
 
     async def _async_update_data(self) -> dict[str, Any]:
-        """Вызывается каждый час. Отправляет только если настал нужный день и ещё не отправляли."""
-        cfg = self._get_effective_config()
-        submit_day = int(cfg.get(CONF_SUBMIT_DAY, 20))
-        today = datetime.now()
-
-        if today.day != submit_day:
-            return self.data or {}
-
-        if self._submitted_month == self._current_month():
-            return self.data or {}
-
+        """Вызывается каждый час. Всегда опрашивает статус; отправляет в нужный день."""
+        # Всегда получаем актуальный статус счётчиков
         try:
-            result = await self.hass.async_add_executor_job(self._submit)
+            device_data = await self.hass.async_add_executor_job(self._fetch_device_info)
         except (UpdateFailed, ConfigEntryAuthFailed):
             raise
         except Exception as err:
             raise UpdateFailed(f"Неожиданная ошибка: {err}") from err
+
+        # Сохраняем данные предыдущей отправки
+        prev = self.data or {}
+        result: dict[str, Any] = {}
+        for key in ("last_cold", "last_hot", "last_status", "last_submitted_at"):
+            if key in prev:
+                result[key] = prev[key]
+        result.update(device_data)
+
+        # Отправляем показания в нужный день (не повторяем в том же месяце)
+        cfg = self._get_effective_config()
+        submit_day = int(cfg.get(CONF_SUBMIT_DAY, 20))
+        if (
+            datetime.now().day == submit_day
+            and self._submitted_month != self._current_month()
+        ):
+            try:
+                submit_result = await self.hass.async_add_executor_job(self._submit)
+                result.update(submit_result)
+            except (UpdateFailed, ConfigEntryAuthFailed):
+                raise
+            except Exception as err:
+                raise UpdateFailed(f"Неожиданная ошибка при отправке: {err}") from err
 
         return result
 

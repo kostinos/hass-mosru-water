@@ -6,7 +6,7 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN, CONF_COLD_ENTITY, CONF_HOT_ENTITY, CONF_SUBMIT_DAY
+from .const import DOMAIN
 from .coordinator import MosRuWaterCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -20,11 +20,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     entry_data = dict(entry.data)
     if entry.options:
-        entry_data.update({
-            CONF_COLD_ENTITY: entry.options.get(CONF_COLD_ENTITY, entry_data.get(CONF_COLD_ENTITY)),
-            CONF_HOT_ENTITY:  entry.options.get(CONF_HOT_ENTITY,  entry_data.get(CONF_HOT_ENTITY)),
-            CONF_SUBMIT_DAY:  entry.options.get(CONF_SUBMIT_DAY,  entry_data.get(CONF_SUBMIT_DAY)),
-        })
+        entry_data.update(entry.options)
 
     coordinator = MosRuWaterCoordinator(hass, entry_data)
     await coordinator.async_config_entry_first_refresh()

@@ -13,6 +13,11 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import selector
 
+from homeassistant.components.persistent_notification import (
+    async_create as pn_create,
+    async_dismiss as pn_dismiss,
+)
+
 from .api import MosRuAuthError, MosRuApiError, MosRuClient
 from .const import (
     DOMAIN,
@@ -47,9 +52,13 @@ def _write_qr_svg(www_dir: str, link: str, cache_buster: int) -> str:
 
         os.makedirs(www_dir, exist_ok=True)
         qr_path = os.path.join(www_dir, _QR_FILE)
-        factory = qrcode.image.svg.SvgPathImage
-        qr_img = qrcode.make(link, image_factory=factory, border=2)
-        qr_img.save(qr_path)
+        factory = qrcode.image.svg.SvgFillImage
+        qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, border=2)
+        qr.add_data(link)
+        qr.make(fit=True)
+        qr_img = qr.make_image(image_factory=factory)
+        with open(qr_path, "wb") as f:
+            qr_img.save(f)
         return f"/local/{_QR_FILE}?t={cache_buster}"
     except Exception:
         _LOGGER.exception("Не удалось сгенерировать QR-код")
@@ -64,6 +73,7 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         self._data: dict[str, Any] = {}
         self._counters: list[dict] = []
+        self._counters_fetched: bool = False
         self._client: MosRuClient | None = None
         self._qr_task: asyncio.Task | None = None
         self._qr_url: str = ""
@@ -111,6 +121,17 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 _write_qr_svg, www_dir, qr_data["link"], ts
             )
             self._qr_task = self.hass.async_create_task(self._poll_qr_scan())
+            pn_create(
+                self.hass,
+                message=(
+                    f"Отсканируйте QR-код приложением **mos.ru** "
+                    f"или **Госуслуги Москвы**:\n\n"
+                    f"![QR-код]({self._qr_url})\n\n"
+                    f"[Открыть QR-код напрямую]({self._qr_url})"
+                ),
+                title="MOS.RU Water: Авторизация",
+                notification_id="mosru_water_qr",
+            )
 
         if not self._qr_task.done():
             return self.async_show_progress(
@@ -122,16 +143,23 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         # Задача завершена
         try:
-            success: bool = self._qr_task.result()
+            result = self._qr_task.result()
         except Exception:
             self._qr_task = None
             return self.async_abort(reason="cannot_connect")
 
         self._qr_task = None
 
-        if not success:
-            # QR истёк или ошибка — начать заново
+        if result == "code_required":
+            pn_dismiss(self.hass, notification_id="mosru_water_qr")
+            return self.async_show_progress_done(next_step_id="code")
+
+        if not result:
+            # QR истёк или ошибка — начать заново со свежей сессией
+            self._client = MosRuClient()
             return await self.async_step_qr()
+
+        pn_dismiss(self.hass, notification_id="mosru_water_qr")
 
         # Сохранить cookies
         cookies = await self.hass.async_add_executor_job(
@@ -150,21 +178,34 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def _poll_qr_scan(self) -> bool:
         """Фоновая задача: опросить QR до сканирования или истечения."""
-        for _ in range(_QR_POLL_SECONDS):
+        _LOGGER.debug("QR polling started")
+        for tick in range(_QR_POLL_SECONDS):
             await asyncio.sleep(1)
             try:
                 command = await self.hass.async_add_executor_job(self._client.poll_qr)
-            except MosRuApiError:
+            except MosRuApiError as err:
+                _LOGGER.error("QR poll error at tick %d: %s", tick, err)
                 return False
+
+            if tick % 10 == 0:
+                _LOGGER.debug("QR poll tick=%d command=%r", tick, command)
 
             if command == "needComplete":
                 try:
-                    await self.hass.async_add_executor_job(
+                    status = await self.hass.async_add_executor_job(
                         self._client.complete_qr_auth
                     )
-                    return True
                 except (MosRuAuthError, MosRuApiError):
                     return False
+                if status == "sms_required":
+                    return "code_required"
+                return True
+
+            if command == "askForConfirm":
+                # Сервер отправил пуш «Подтвердить вход?» на телефон.
+                # Продолжаем поллинг — после тапа «Подтвердить» придёт needComplete.
+                _LOGGER.debug("QR poll tick=%d askForConfirm, waiting for user to confirm", tick)
+                continue
 
             if command == "needRefresh":
                 try:
@@ -180,17 +221,67 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     return False
                 continue
 
-            # showQRCode / askForConfirm — продолжаем опрос
+            # showQRCode — продолжаем опрос
 
         return False  # таймаут
 
-    # ── Шаг 3: выбор счётчиков ───────────────────────────────────────────
+    # ── Шаг 3: ввод 6-значного 2FA-кода ─────────────────────────────────
+
+    async def async_step_code(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Ввод 6-значного кода из пуш-уведомления (2FA)."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            code = user_input.get("sms_code", "").strip()
+            try:
+                await self.hass.async_add_executor_job(
+                    self._client.submit_sms_and_trust, code
+                )
+            except MosRuAuthError:
+                errors["sms_code"] = "invalid_code"
+            except MosRuApiError:
+                return self.async_abort(reason="cannot_connect")
+            else:
+                await self.hass.async_add_executor_job(self._client.warm_session)
+                cookies = await self.hass.async_add_executor_job(
+                    self._client.get_session_cookies
+                )
+                self._data[CONF_SESSION_COOKIES] = cookies
+
+                if self._reauth_entry is not None:
+                    self.hass.config_entries.async_update_entry(
+                        self._reauth_entry,
+                        data={**self._reauth_entry.data, CONF_SESSION_COOKIES: cookies},
+                    )
+                    return self.async_abort(reason="reauth_successful")
+
+                return await self.async_step_discover()
+
+        return self.async_show_form(
+            step_id="code",
+            data_schema=vol.Schema({
+                vol.Required("sms_code"): selector.TextSelector(
+                    selector.TextSelectorConfig(
+                        type=selector.TextSelectorType.TEXT
+                    )
+                ),
+            }),
+            errors=errors,
+        )
+
+    # ── Шаг 4: выбор счётчиков ───────────────────────────────────────────
 
     async def async_step_discover(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Выбор счётчиков из списка mos.ru."""
-        if not self._counters:
+        """Выбор счётчиков: автоматически из API или ручной ввод ID."""
+        errors: dict[str, str] = {}
+
+        # Однократно запрашиваем список счётчиков
+        if not self._counters_fetched:
+            self._counters_fetched = True
             try:
                 self._counters = await self.hass.async_add_executor_job(
                     self._client.get_counters,
@@ -200,34 +291,77 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except MosRuAuthError:
                 return self.async_abort(reason="session_expired")
             except MosRuApiError:
-                return self.async_abort(reason="cannot_get_counters")
+                self._counters = []  # падаем в ручной ввод
 
-            if not self._counters:
-                return self.async_abort(reason="no_counters")
+        # ── Счётчики найдены автоматически ───────────────────────────────
+        if self._counters:
+            counter_options = [
+                selector.SelectOptionDict(
+                    value=c["id"],
+                    label=f"{c['name']} ({c['type']}, ID: {c['id']})",
+                )
+                for c in self._counters
+            ]
+            if user_input is not None:
+                self._data[CONF_COLD_ID] = user_input[CONF_COLD_ID]
+                self._data[CONF_HOT_ID]  = user_input[CONF_HOT_ID]
+                return await self.async_step_sensors()
 
-        counter_options = [
-            selector.SelectOptionDict(value=c["id"], label=f"{c['name']} (ID: {c['id']})")
-            for c in self._counters
-        ]
+            return self.async_show_form(
+                step_id="discover",
+                data_schema=vol.Schema({
+                    vol.Required(CONF_COLD_ID): selector.SelectSelector(
+                        selector.SelectSelectorConfig(options=counter_options)
+                    ),
+                    vol.Required(CONF_HOT_ID): selector.SelectSelector(
+                        selector.SelectSelectorConfig(options=counter_options)
+                    ),
+                }),
+                description_placeholders={
+                    "description": "Выберите счётчики из вашего личного кабинета mos.ru",
+                },
+            )
 
+        # ── Счётчики не найдены — ручной ввод ────────────────────────────
         if user_input is not None:
-            self._data[CONF_COLD_ID] = user_input[CONF_COLD_ID]
-            self._data[CONF_HOT_ID]  = user_input[CONF_HOT_ID]
-            return await self.async_step_sensors()
+            if user_input.get("retry_discovery"):
+                self._counters_fetched = False
+                self._counters = []
+                return await self.async_step_discover()
+
+            cold_id = user_input.get(CONF_COLD_ID, "").strip()
+            hot_id  = user_input.get(CONF_HOT_ID, "").strip()
+            if not cold_id:
+                errors[CONF_COLD_ID] = "required"
+            if not hot_id:
+                errors[CONF_HOT_ID] = "required"
+            if not errors:
+                self._data[CONF_COLD_ID] = cold_id
+                self._data[CONF_HOT_ID]  = hot_id
+                return await self.async_step_sensors()
 
         return self.async_show_form(
             step_id="discover",
             data_schema=vol.Schema({
-                vol.Required(CONF_COLD_ID): selector.SelectSelector(
-                    selector.SelectSelectorConfig(options=counter_options)
+                vol.Optional(CONF_COLD_ID, default=""): selector.TextSelector(
+                    selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
                 ),
-                vol.Required(CONF_HOT_ID): selector.SelectSelector(
-                    selector.SelectSelectorConfig(options=counter_options)
+                vol.Optional(CONF_HOT_ID, default=""): selector.TextSelector(
+                    selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
                 ),
+                vol.Optional("retry_discovery", default=False): selector.BooleanSelector(),
             }),
+            description_placeholders={
+                "description": (
+                    "Счётчики не найдены автоматически. "
+                    "Введите ID вручную (см. mos.ru → ЖКУ → номер прибора) "
+                    "или нажмите «Обновить список счётчиков»."
+                ),
+            },
+            errors=errors,
         )
 
-    # ── Шаг 4: HA-сенсоры ────────────────────────────────────────────────
+    # ── Шаг 5: HA-сенсоры ────────────────────────────────────────────────
 
     async def async_step_sensors(
         self, user_input: dict[str, Any] | None = None
@@ -303,6 +437,10 @@ class MosRuWaterOptionsFlow(config_entries.OptionsFlow):
                 err = _validate_sensor(self.hass, user_input[field])
                 if err:
                     errors[field] = err
+            if not user_input.get(CONF_COLD_ID, "").strip():
+                errors[CONF_COLD_ID] = "required"
+            if not user_input.get(CONF_HOT_ID, "").strip():
+                errors[CONF_HOT_ID] = "required"
 
             if not errors:
                 return self.async_create_entry(title="", data=user_input)
@@ -310,6 +448,16 @@ class MosRuWaterOptionsFlow(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema({
+                vol.Optional(
+                    CONF_COLD_ID, default=data.get(CONF_COLD_ID, "")
+                ): selector.TextSelector(
+                    selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
+                ),
+                vol.Optional(
+                    CONF_HOT_ID, default=data.get(CONF_HOT_ID, "")
+                ): selector.TextSelector(
+                    selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
+                ),
                 vol.Required(
                     CONF_COLD_ENTITY, default=data.get(CONF_COLD_ENTITY, "")
                 ): selector.EntitySelector(

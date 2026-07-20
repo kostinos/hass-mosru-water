@@ -7,5 +7,5 @@
   "codeowners": [],
   "iot_class": "cloud_polling",
   "config_flow": true,
-  "documentation": "https://github.com/kostinos/mosru-water-ha"
+  "documentation": "https://github.com/kostinos/hass-mosru-water"
 }

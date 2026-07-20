@@ -17,7 +17,7 @@ HACS-интеграция для Home Assistant: автоматически пе
 ## Установка через HACS
 
 1. В HACS → **Custom repositories** добавьте:
-   - URL: `https://github.com/kostinos/mosru-water-ha`
+   - URL: `https://github.com/kostinos/hass-mosru-water`
    - Category: `Integration`
 2. Найдите **MOS.RU Water Meter** в HACS и установите
 3. Перезапустите Home Assistant
