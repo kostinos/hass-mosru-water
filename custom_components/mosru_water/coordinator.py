@@ -81,14 +81,18 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         hot_info  = device_map.get(cfg.get(CONF_HOT_ID, ""), {})
 
         return {
-            "cold_current":          cold_info.get("current_reading"),
-            "hot_current":           hot_info.get("current_reading"),
-            "cold_readonly":         cold_info.get("readonly", True),
-            "hot_readonly":          hot_info.get("readonly", True),
-            "cold_inspection_date":  cold_info.get("inspection_date"),
-            "hot_inspection_date":   hot_info.get("inspection_date"),
+            "cold_current":           cold_info.get("current_reading"),
+            "hot_current":            hot_info.get("current_reading"),
+            "cold_readonly":          cold_info.get("readonly", True),
+            "hot_readonly":           hot_info.get("readonly", True),
+            "cold_inspection_date":   cold_info.get("inspection_date"),
+            "hot_inspection_date":    hot_info.get("inspection_date"),
             "cold_inspection_status": cold_info.get("inspection_status", ""),
             "hot_inspection_status":  hot_info.get("inspection_status", ""),
+            "cold_reading_period":    cold_info.get("reading_period"),
+            "hot_reading_period":     hot_info.get("reading_period"),
+            "cold_number":            cold_info.get("number"),
+            "hot_number":             hot_info.get("number"),
         }
 
     async def async_submit_now(self) -> dict[str, Any]:
