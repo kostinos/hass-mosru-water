@@ -18,11 +18,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Настройка интеграции из config entry."""
     hass.data.setdefault(DOMAIN, {})
 
-    entry_data = dict(entry.data)
-    if entry.options:
-        entry_data.update(entry.options)
-
-    coordinator = MosRuWaterCoordinator(hass, entry_data)
+    coordinator = MosRuWaterCoordinator(hass, entry)
     await coordinator.async_config_entry_first_refresh()
 
     hass.data[DOMAIN][entry.entry_id] = coordinator

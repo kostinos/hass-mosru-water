@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -25,9 +26,10 @@ _LOGGER = logging.getLogger(__name__)
 class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Координатор: периодически проверяет нужно ли отправить показания."""
 
-    def __init__(self, hass: HomeAssistant, entry_data: dict[str, Any]) -> None:
-        self._entry_data = entry_data
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        self._entry = entry
         self._submitted_month: str | None = None
+        self._client: MosRuClient | None = None
 
         super().__init__(
             hass,
@@ -38,6 +40,49 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _current_month(self) -> str:
         return datetime.now().strftime("%Y-%m")
+
+    def _get_effective_config(self) -> dict[str, Any]:
+        data = dict(self._entry.data)
+        if self._entry.options:
+            data.update(self._entry.options)
+        return data
+
+    def _get_client(self) -> MosRuClient:
+        """Вернуть кешированный клиент или создать из сохранённых cookies."""
+        if self._client is None:
+            cookies = self._get_effective_config().get(CONF_SESSION_COOKIES, {})
+            if not cookies:
+                raise ConfigEntryAuthFailed(
+                    "Нет сохранённой сессии, требуется повторная авторизация"
+                )
+            client = MosRuClient()
+            client.restore_session(cookies)
+            self._client = client
+            _LOGGER.debug("Создан новый MosRuClient из сохранённых cookies")
+        return self._client
+
+    def _invalidate_client(self) -> None:
+        """Сбросить кешированный клиент (вызывать при ошибке авторизации)."""
+        self._client = None
+
+    def _persist_cookies(self) -> None:
+        """Сохранить текущие cookies клиента обратно в config entry.
+
+        Вызывать из event loop после успешного API-вызова.
+        mos.ru обновляет TTL cookie при каждом запросе — без этого
+        сохранённые cookies стареют даже при активном использовании.
+        """
+        if self._client is None:
+            return
+        new_cookies = self._client.get_session_cookies()
+        current = self._get_effective_config().get(CONF_SESSION_COOKIES, {})
+        if new_cookies == current:
+            return
+        self.hass.config_entries.async_update_entry(
+            self._entry,
+            data={**self._entry.data, CONF_SESSION_COOKIES: new_cookies},
+        )
+        _LOGGER.debug("Cookies сессии обновлены в config entry (%d ключей)", len(new_cookies))
 
     def _read_sensor(self, entity_id: str) -> float:
         state = self.hass.states.get(entity_id)
@@ -50,29 +95,18 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 f"Не удалось прочитать значение {entity_id}: {state.state}"
             ) from err
 
-    def _get_effective_config(self) -> dict[str, Any]:
-        return dict(self._entry_data)
-
-    def _make_client(self, cfg: dict[str, Any]) -> MosRuClient:
-        """Создать клиент с восстановленной сессией."""
-        cookies = cfg.get(CONF_SESSION_COOKIES, {})
-        if not cookies:
-            raise UpdateFailed("Нет сохранённой сессии, требуется повторная авторизация")
-        client = MosRuClient()
-        client.restore_session(cookies)
-        return client
-
     def _fetch_device_info(self) -> dict[str, Any]:
         """Получить текущий статус счётчиков из API (синхронно)."""
         cfg = self._get_effective_config()
         try:
-            client = self._make_client(cfg)
-        except UpdateFailed as err:
-            raise ConfigEntryAuthFailed(str(err)) from err
+            client = self._get_client()
+        except ConfigEntryAuthFailed:
+            raise
 
         try:
             device_map = client.get_device_info(cfg[CONF_PAYCODE], cfg[CONF_FLAT])
         except MosRuAuthError as err:
+            self._invalidate_client()
             raise ConfigEntryAuthFailed(str(err)) from err
         except MosRuApiError as err:
             raise UpdateFailed(f"Ошибка получения статуса: {err}") from err
@@ -97,7 +131,9 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def async_submit_now(self) -> dict[str, Any]:
         """Отправить показания прямо сейчас (вызывается из button.py)."""
-        return await self.hass.async_add_executor_job(self._submit)
+        result = await self.hass.async_add_executor_job(self._submit)
+        self._persist_cookies()
+        return result
 
     def _submit(self) -> dict[str, Any]:
         cfg = self._get_effective_config()
@@ -105,9 +141,9 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         hot_val  = self._read_sensor(cfg[CONF_HOT_ENTITY])
 
         try:
-            client = self._make_client(cfg)
-        except UpdateFailed as err:
-            raise ConfigEntryAuthFailed(str(err)) from err
+            client = self._get_client()
+        except ConfigEntryAuthFailed:
+            raise
 
         try:
             cold_resp = client.send_reading(
@@ -117,6 +153,7 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 cfg[CONF_PAYCODE], cfg[CONF_FLAT], cfg[CONF_HOT_ID], hot_val
             )
         except MosRuAuthError as err:
+            self._invalidate_client()
             raise ConfigEntryAuthFailed(str(err)) from err
         except MosRuApiError as err:
             raise UpdateFailed(f"Ошибка отправки: {err}") from err
@@ -140,7 +177,6 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Вызывается каждый час. Всегда опрашивает статус; отправляет в нужный день."""
-        # Всегда получаем актуальный статус счётчиков
         try:
             device_data = await self.hass.async_add_executor_job(self._fetch_device_info)
         except (UpdateFailed, ConfigEntryAuthFailed):
@@ -148,7 +184,9 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as err:
             raise UpdateFailed(f"Неожиданная ошибка: {err}") from err
 
-        # Сохраняем данные предыдущей отправки
+        # Сохраняем обновлённые cookies (mos.ru обновляет TTL при каждом запросе)
+        self._persist_cookies()
+
         prev = self.data or {}
         result: dict[str, Any] = {}
         for key in ("last_cold", "last_hot", "last_status", "last_submitted_at"):
@@ -156,7 +194,6 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 result[key] = prev[key]
         result.update(device_data)
 
-        # Отправляем показания в нужный день (не повторяем в том же месяце)
         cfg = self._get_effective_config()
         submit_day = int(cfg.get(CONF_SUBMIT_DAY, 20))
         if (
@@ -165,6 +202,7 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ):
             try:
                 submit_result = await self.hass.async_add_executor_job(self._submit)
+                self._persist_cookies()
                 result.update(submit_result)
             except (UpdateFailed, ConfigEntryAuthFailed):
                 raise
@@ -174,5 +212,9 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return result
 
     def update_config(self, new_data: dict[str, Any]) -> None:
-        """Обновить конфиг (вызывается при изменении options)."""
-        self._entry_data = new_data
+        """Обновить конфиг (вызывается при изменении options).
+
+        Самого _entry обновлять не нужно — HA уже сделал это до вызова.
+        Сбрасываем кешированный клиент, чтобы он пересоздался из актуальных cookies.
+        """
+        self._invalidate_client()
