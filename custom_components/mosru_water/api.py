@@ -340,6 +340,39 @@ class MosRuClient:
             if "Ltpatoken2" not in cookie_names:
                 raise MosRuAuthError("Авторизация не завершена: Ltpatoken2 не установлен")
 
+    def try_refresh_acst(self) -> bool:
+        """Обновить acst через ACS login с существующим Ltpatoken2.
+
+        acst выдаётся с Max-Age=3600; браузер обновляет его тихо через этот же
+        endpoint. Возвращает True если сессия осталась живой (финальный URL на www.mos.ru).
+        """
+        try:
+            resp = self._session.get(
+                "https://www.mos.ru/api/acs/v1/login",
+                headers={
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Referer": "https://www.mos.ru/",
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "same-origin",
+                    "Sec-Fetch-User": "?1",
+                    "Upgrade-Insecure-Requests": "1",
+                },
+                allow_redirects=True,
+                timeout=_TIMEOUT,
+            )
+            alive = resp.url.startswith("https://www.mos.ru") and resp.status_code == 200
+            _LOGGER.debug(
+                "try_refresh_acst: final_url=%s status=%d set-cookie=%r alive=%s",
+                resp.url, resp.status_code,
+                resp.headers.get("Set-Cookie", "")[:200],
+                alive,
+            )
+            return alive
+        except requests.RequestException as err:
+            _LOGGER.warning("try_refresh_acst failed: %s", err)
+            return False
+
     def warm_session(self) -> None:
         """GET главной и /pgu/ mos.ru — инициализирует сессии портала после OAuth."""
         warm_headers = {
@@ -363,27 +396,37 @@ class MosRuClient:
                     timeout=_TIMEOUT,
                 )
                 _LOGGER.debug(
-                    "warm_session %s: status=%d final_url=%s set-cookie=%r new_cookies=%s",
+                    "warm_session %s: status=%d final_url=%s set-cookie=%r",
                     url,
                     resp.status_code,
                     resp.url,
-                    resp.headers.get("Set-Cookie", ""),
-                    {c.name: (c.domain, c.path) for c in self._session.cookies},
+                    resp.headers.get("Set-Cookie", "")[:200],
                 )
             except requests.RequestException as err:
                 _LOGGER.warning("warm_session %s failed: %s", url, err)
 
     def get_session_cookies(self) -> dict:
-        """Вернуть текущие cookies для сохранения в конфиге."""
-        return {c.name: c.value for c in self._session.cookies}
+        """Вернуть текущие cookies с доменами для сохранения в конфиге."""
+        return {
+            c.name: {"value": c.value, "domain": c.domain or "", "path": c.path or "/"}
+            for c in self._session.cookies
+        }
 
     def restore_session(self, cookies: dict) -> None:
-        """Восстановить сессию из сохранённых cookies."""
+        """Восстановить сессию из сохранённых cookies (с доменами)."""
         self._session = requests.Session()
         self._session.headers.update({"User-Agent": _USER_AGENT})
         self._login_referer = "https://login.mos.ru/"
-        for name, value in cookies.items():
-            self._session.cookies.set(name, value)
+        for name, data in cookies.items():
+            if isinstance(data, dict):
+                self._session.cookies.set(
+                    name, data["value"],
+                    domain=data.get("domain") or None,
+                    path=data.get("path") or "/",
+                )
+            else:
+                # обратная совместимость: старый формат name → value (строка)
+                self._session.cookies.set(name, data)
 
     # ── API ───────────────────────────────────────────────────────────────
 
