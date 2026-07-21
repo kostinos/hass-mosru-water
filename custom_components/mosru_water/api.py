@@ -86,11 +86,6 @@ class MosRuClient:
                 timeout=_TIMEOUT,
             )
             self._login_referer = resp_init.url
-            _LOGGER.debug(
-                "start_qr_session: oauth init final_url=%s cookies=%s",
-                resp_init.url,
-                {c.name: c.domain for c in self._session.cookies},
-            )
             # POST refresh создаёт QR-сессию
             resp = self._session.post(
                 _QR_REFRESH_URL,
@@ -133,11 +128,6 @@ class MosRuClient:
                 },
                 allow_redirects=False,
                 timeout=_TIMEOUT,
-            )
-            _LOGGER.debug(
-                "poll_qr: status=%d content-type=%s",
-                resp.status_code,
-                resp.headers.get("Content-Type", "?"),
             )
             if resp.status_code in (301, 302, 303, 307, 308):
                 loc = resp.headers.get("Location", "?")
@@ -192,23 +182,11 @@ class MosRuClient:
             )
         except requests.RequestException as err:
             raise MosRuApiError(f"Сетевая ошибка: {err}") from err
-        _LOGGER.debug(
-            "complete_qr_auth: final_url=%s status=%d cookies=%s",
-            resp.url,
-            resp.status_code,
-            {c.name: c.domain for c in self._session.cookies},
-        )
         if resp.status_code >= 400:
             raise MosRuAuthError("Ошибка завершения QR-авторизации")
         if "methods2/sms" in resp.url or "/methods/sms" in resp.url:
-            # Парсим форму страницы — нам нужны action и скрытые поля
             self._sms_page_url = resp.url
             self._sms_form_action, self._sms_hidden = _parse_form(resp.text)
-            _LOGGER.debug(
-                "complete_qr_auth: SMS form action=%r hidden_keys=%s",
-                self._sms_form_action,
-                list(self._sms_hidden.keys()),
-            )
             return "sms_required"
         return "done"
 
@@ -218,7 +196,6 @@ class MosRuClient:
         form_action = getattr(self, "_sms_form_action", "")
         hidden = dict(getattr(self, "_sms_hidden", {}))
 
-        # Формируем URL для POST из action формы
         if form_action.startswith("http"):
             sms_url = form_action
         elif form_action.startswith("/"):
@@ -228,12 +205,6 @@ class MosRuClient:
             sms_url = f"{_SMS_URL}?bo={bo_param}"
 
         post_data = {**hidden, "sms-code": code}
-        _LOGGER.debug(
-            "submit_sms_and_trust: POST %s fields=%s",
-            sms_url,
-            list(post_data.keys()),
-        )
-
         try:
             resp = self._session.post(
                 sms_url,
@@ -248,12 +219,6 @@ class MosRuClient:
         except requests.RequestException as err:
             raise MosRuApiError(f"Сетевая ошибка: {err}") from err
 
-        _LOGGER.debug(
-            "submit_sms_and_trust: after SMS POST final_url=%s status=%d body_start=%r",
-            resp.url,
-            resp.status_code,
-            resp.text[:300],
-        )
         if resp.status_code >= 400:
             raise MosRuAuthError("Неверный SMS-код")
 
@@ -261,11 +226,6 @@ class MosRuClient:
         if "askToTrust" in resp.url:
             trust_page_url = resp.url
             trust_form_action, trust_hidden = _parse_form(resp.text)
-            _LOGGER.debug(
-                "submit_sms_and_trust: askToTrust form action=%r hidden_keys=%s",
-                trust_form_action,
-                list(trust_hidden.keys()),
-            )
             if trust_form_action.startswith("http"):
                 trust_url = trust_form_action
             elif trust_form_action.startswith("/"):
@@ -292,14 +252,13 @@ class MosRuClient:
             except requests.RequestException as err:
                 raise MosRuApiError(f"Сетевая ошибка: {err}") from err
 
-            # Следуем редиректам вручную, логируя каждый шаг
+            # Следуем редиректам вручную
             for step in range(15):
                 loc = resp2.headers.get("Location", "")
                 if resp2.status_code not in (301, 302, 303, 307, 308) or not loc:
                     break
                 if not loc.startswith("http"):
                     loc = urllib.parse.urljoin(resp2.url, loc)
-                _LOGGER.debug("trust redirect %d: %s -> %s", step, resp2.url, loc)
                 # satisfy требует sec-fetch-* заголовки как у браузерной навигации
                 req_headers: dict[str, str] = {
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -319,21 +278,7 @@ class MosRuClient:
                     )
                 except requests.RequestException as err:
                     raise MosRuApiError(f"Сетевая ошибка: {err}") from err
-                _LOGGER.debug(
-                    "trust step %d: status=%d url=%s set-cookie=%r body=%r",
-                    step,
-                    resp2.status_code,
-                    resp2.url,
-                    resp2.headers.get("Set-Cookie", "")[:200],
-                    resp2.text[:200],
-                )
 
-            _LOGGER.debug(
-                "submit_sms_and_trust: final url=%s status=%d cookies=%s",
-                resp2.url,
-                resp2.status_code,
-                {c.name: c.domain for c in self._session.cookies},
-            )
             if resp2.status_code >= 400 and resp2.status_code < 500:
                 raise MosRuAuthError("Ошибка доверия устройству")
             cookie_names = {c.name for c in self._session.cookies}
@@ -365,14 +310,7 @@ class MosRuClient:
                 allow_redirects=True,
                 timeout=_TIMEOUT,
             )
-            alive = "status=200" in resp.url
-            _LOGGER.debug(
-                "try_refresh_acst: final_url=%s status=%d set-cookie=%r alive=%s",
-                resp.url, resp.status_code,
-                resp.headers.get("Set-Cookie", "")[:200],
-                alive,
-            )
-            return alive
+            return "status=200" in resp.url
         except requests.RequestException as err:
             _LOGGER.warning("try_refresh_acst failed: %s", err)
             return False
@@ -393,18 +331,11 @@ class MosRuClient:
             _SERVICE_PAGE_URL,
         ):
             try:
-                resp = self._session.get(
+                self._session.get(
                     url,
                     headers=warm_headers,
                     allow_redirects=True,
                     timeout=_TIMEOUT,
-                )
-                _LOGGER.debug(
-                    "warm_session %s: status=%d final_url=%s set-cookie=%r",
-                    url,
-                    resp.status_code,
-                    resp.url,
-                    resp.headers.get("Set-Cookie", "")[:200],
                 )
             except requests.RequestException as err:
                 _LOGGER.warning("warm_session %s failed: %s", url, err)
@@ -436,13 +367,6 @@ class MosRuClient:
 
     def get_counters(self, paycode: str, flat: str) -> list[dict]:
         """Получить список счётчиков из личного кабинета."""
-        key_cookies = {
-            c.name: (c.value[:40] if c.value else "", c.domain, c.path)
-            for c in self._session.cookies
-            if c.name in ("Ltpatoken2", "acst", "ACS-SESSID", "yabm")
-        }
-        _LOGGER.debug("get_counters: key_cookies=%s", key_cookies)
-
         url = f"{_UTILITY_METER_URL}/device"
         params = {"flat": flat, "payer_code": paycode}
         headers = {
@@ -452,17 +376,6 @@ class MosRuClient:
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Site": "same-origin",
         }
-
-        prepared = self._session.prepare_request(
-            requests.Request("GET", url, params=params, headers=headers)
-        )
-        cookie_hdr = prepared.headers.get("Cookie", "(none)")
-        _LOGGER.debug(
-            "get_counters: url=%s Cookie len=%d val=%r",
-            prepared.url,
-            len(cookie_hdr),
-            cookie_hdr[:800],
-        )
 
         try:
             resp = self._session.get(
@@ -474,11 +387,6 @@ class MosRuClient:
         except requests.RequestException as err:
             raise MosRuApiError(f"Сетевая ошибка: {err}") from err
 
-        _LOGGER.debug(
-            "get_counters: status=%d body_start=%r",
-            resp.status_code,
-            resp.text[:600],
-        )
         if resp.status_code in (401, 403):
             raise MosRuAuthError("Сессия истекла, требуется повторная авторизация")
 
@@ -537,8 +445,6 @@ class MosRuClient:
         except requests.RequestException as err:
             raise MosRuApiError(f"Сетевая ошибка: {err}") from err
 
-        _LOGGER.debug("get_device_info: status=%d body=%r", resp.status_code, resp.text[:600])
-
         if resp.status_code in (401, 403):
             raise MosRuAuthError("Сессия истекла, требуется повторная авторизация")
 
@@ -591,7 +497,6 @@ class MosRuClient:
             "indication": round(value_m3, 3),
             "period": period,
         }
-        _LOGGER.debug("send_reading: payload=%s", payload)
         try:
             resp = self._session.post(
                 f"{_UTILITY_METER_URL}/reading",
@@ -609,11 +514,6 @@ class MosRuClient:
         except requests.RequestException as err:
             raise MosRuApiError(f"Сетевая ошибка: {err}") from err
 
-        _LOGGER.debug(
-            "send_reading: status=%d body=%r",
-            resp.status_code,
-            resp.text[:400],
-        )
         if resp.status_code in (401, 403):
             raise MosRuAuthError("Сессия истекла, требуется повторная авторизация")
 

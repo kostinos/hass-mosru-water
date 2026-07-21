@@ -180,7 +180,6 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def _poll_qr_scan(self) -> bool:
         """Фоновая задача: опросить QR до сканирования или истечения."""
-        _LOGGER.debug("QR polling started")
         for tick in range(_QR_POLL_SECONDS):
             await asyncio.sleep(1)
             try:
@@ -188,9 +187,6 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except MosRuApiError as err:
                 _LOGGER.error("QR poll error at tick %d: %s", tick, err)
                 return False
-
-            if tick % 10 == 0:
-                _LOGGER.debug("QR poll tick=%d command=%r", tick, command)
 
             if command == "needComplete":
                 try:
@@ -206,7 +202,6 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if command == "askForConfirm":
                 # Сервер отправил пуш «Подтвердить вход?» на телефон.
                 # Продолжаем поллинг — после тапа «Подтвердить» придёт needComplete.
-                _LOGGER.debug("QR poll tick=%d askForConfirm, waiting for user to confirm", tick)
                 continue
 
             if command == "needRefresh":

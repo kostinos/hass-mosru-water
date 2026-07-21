@@ -58,7 +58,6 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             client = MosRuClient()
             client.restore_session(cookies)
             self._client = client
-            _LOGGER.debug("Создан новый MosRuClient из сохранённых cookies")
         return self._client
 
     def _invalidate_client(self) -> None:
@@ -82,7 +81,6 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._entry,
             data={**self._entry.data, CONF_SESSION_COOKIES: new_cookies},
         )
-        _LOGGER.debug("Cookies сессии обновлены в config entry (%d ключей)", len(new_cookies))
 
     def _read_sensor(self, entity_id: str) -> float:
         state = self.hass.states.get(entity_id)
