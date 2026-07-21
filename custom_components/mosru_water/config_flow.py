@@ -77,6 +77,7 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._client: MosRuClient | None = None
         self._qr_task: asyncio.Task | None = None
         self._qr_url: str = ""
+        self._qr_link: str = ""
         self._reauth_entry: config_entries.ConfigEntry | None = None
 
     # ── Шаг 1: код плательщика и квартира ────────────────────────────────
@@ -117,8 +118,9 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             ts = int(time.time())
             www_dir = self.hass.config.path("www")
+            self._qr_link = qr_data["link"]
             self._qr_url = await self.hass.async_add_executor_job(
-                _write_qr_svg, www_dir, qr_data["link"], ts
+                _write_qr_svg, www_dir, self._qr_link, ts
             )
             self._qr_task = self.hass.async_create_task(self._poll_qr_scan())
             pn_create(
@@ -127,7 +129,7 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     f"Отсканируйте QR-код приложением **mos.ru** "
                     f"или **Госуслуги Москвы**:\n\n"
                     f"![QR-код]({self._qr_url})\n\n"
-                    f"[Открыть QR-код напрямую]({self._qr_url})"
+                    f"[Открыть QR-код в новой вкладке]({self._qr_link})"
                 ),
                 title="MOS.RU Water: Авторизация",
                 notification_id="mosru_water_qr",
@@ -214,8 +216,9 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     )
                     ts = int(time.time())
                     www_dir = self.hass.config.path("www")
+                    self._qr_link = qr_data["link"]
                     self._qr_url = await self.hass.async_add_executor_job(
-                        _write_qr_svg, www_dir, qr_data["link"], ts
+                        _write_qr_svg, www_dir, self._qr_link, ts
                     )
                 except MosRuApiError:
                     return False
