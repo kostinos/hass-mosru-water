@@ -341,14 +341,18 @@ class MosRuClient:
                 raise MosRuAuthError("Авторизация не завершена: Ltpatoken2 не установлен")
 
     def try_refresh_acst(self) -> bool:
-        """Обновить acst через ACS login с существующим Ltpatoken2.
+        """Обновить acst через официальный ACS probe endpoint.
 
-        acst выдаётся с Max-Age=3600; браузер обновляет его тихо через этот же
-        endpoint. Возвращает True если сессия осталась живой (финальный URL на www.mos.ru).
+        Браузер вызывает /api/acs/v1/probe при каждой загрузке страницы.
+        Если acst истёк, probe тихо делает OAuth через Ltpatoken2 и выдаёт
+        новый acst перед редиректом на back_url?status=200.
+        Возвращает True если сессия жива (финальный URL содержит status=200).
         """
+        back_url = "https://www.mos.ru/shared/acs/core0521.html?fieldName=status"
         try:
             resp = self._session.get(
-                "https://www.mos.ru/api/acs/v1/login",
+                "https://www.mos.ru/api/acs/v1/probe",
+                params={"back_url": back_url},
                 headers={
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                     "Referer": "https://www.mos.ru/",
@@ -361,7 +365,7 @@ class MosRuClient:
                 allow_redirects=True,
                 timeout=_TIMEOUT,
             )
-            alive = resp.url.startswith("https://www.mos.ru") and resp.status_code == 200
+            alive = "status=200" in resp.url
             _LOGGER.debug(
                 "try_refresh_acst: final_url=%s status=%d set-cookie=%r alive=%s",
                 resp.url, resp.status_code,

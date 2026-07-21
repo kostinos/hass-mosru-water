@@ -103,25 +103,18 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except ConfigEntryAuthFailed:
             raise
 
+        # probe обновляет acst через silent OAuth если тот истёк (как браузер).
+        if not client.try_refresh_acst():
+            self._invalidate_client()
+            raise ConfigEntryAuthFailed("Сессия mos.ru истекла, требуется повторная авторизация")
+
         try:
             device_map = client.get_device_info(cfg[CONF_PAYCODE], cfg[CONF_FLAT])
-        except MosRuAuthError:
-            # acst протух (Max-Age=3600) — пробуем обновить через ACS и повторить.
-            if client.try_refresh_acst():
-                _LOGGER.debug("acst обновлён, повторяем get_device_info")
-                try:
-                    device_map = client.get_device_info(cfg[CONF_PAYCODE], cfg[CONF_FLAT])
-                except MosRuAuthError as err2:
-                    self._invalidate_client()
-                    raise ConfigEntryAuthFailed(str(err2)) from err2
-            else:
-                self._invalidate_client()
-                raise ConfigEntryAuthFailed("Сессия истекла, требуется повторная авторизация")
+        except MosRuAuthError as err:
+            self._invalidate_client()
+            raise ConfigEntryAuthFailed(str(err)) from err
         except MosRuApiError as err:
             raise UpdateFailed(f"Ошибка получения статуса: {err}") from err
-
-        # Ltpatoken2 обновляется при обращении к порталу.
-        client.warm_session()
 
         cold_info = device_map.get(cfg.get(CONF_COLD_ID, ""), {})
         hot_info  = device_map.get(cfg.get(CONF_HOT_ID, ""), {})
@@ -157,25 +150,20 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except ConfigEntryAuthFailed:
             raise
 
-        def _do_send() -> tuple:
-            return (
-                client.send_reading(cfg[CONF_PAYCODE], cfg[CONF_FLAT], cfg[CONF_COLD_ID], cold_val),
-                client.send_reading(cfg[CONF_PAYCODE], cfg[CONF_FLAT], cfg[CONF_HOT_ID], hot_val),
-            )
+        if not client.try_refresh_acst():
+            self._invalidate_client()
+            raise ConfigEntryAuthFailed("Сессия mos.ru истекла, требуется повторная авторизация")
 
         try:
-            cold_resp, hot_resp = _do_send()
-        except MosRuAuthError:
-            if client.try_refresh_acst():
-                _LOGGER.debug("acst обновлён, повторяем send_reading")
-                try:
-                    cold_resp, hot_resp = _do_send()
-                except MosRuAuthError as err2:
-                    self._invalidate_client()
-                    raise ConfigEntryAuthFailed(str(err2)) from err2
-            else:
-                self._invalidate_client()
-                raise ConfigEntryAuthFailed("Сессия истекла, требуется повторная авторизация")
+            cold_resp = client.send_reading(
+                cfg[CONF_PAYCODE], cfg[CONF_FLAT], cfg[CONF_COLD_ID], cold_val
+            )
+            hot_resp = client.send_reading(
+                cfg[CONF_PAYCODE], cfg[CONF_FLAT], cfg[CONF_HOT_ID], hot_val
+            )
+        except MosRuAuthError as err:
+            self._invalidate_client()
+            raise ConfigEntryAuthFailed(str(err)) from err
         except MosRuApiError as err:
             raise UpdateFailed(f"Ошибка отправки: {err}") from err
 
