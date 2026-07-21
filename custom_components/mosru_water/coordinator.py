@@ -111,6 +111,10 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except MosRuApiError as err:
             raise UpdateFailed(f"Ошибка получения статуса: {err}") from err
 
+        # Обращение к порталу обновляет Ltpatoken2 и acst — без этого
+        # токен протухает даже при активных API-запросах.
+        client.warm_session()
+
         cold_info = device_map.get(cfg.get(CONF_COLD_ID, ""), {})
         hot_info  = device_map.get(cfg.get(CONF_HOT_ID, ""), {})
 
