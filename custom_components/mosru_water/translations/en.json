@@ -1,0 +1,78 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Personal account details",
+        "description": "Enter the data from your utility bill. Authorization on mos.ru will be performed via a QR code in the next step.",
+        "data": {
+          "paycode": "Payer code (EPD, 10 digits)",
+          "flat":    "Apartment number"
+        }
+      },
+      "qr": {
+        "title": "Authorization via QR code",
+        "description": "Scan the QR code with the **mos.ru** or **Gosuslugi Moscow** app:\n\n![QR code]({qr_url})\n\nAfter scanning, authorization will complete automatically.\n\n*If the QR code is not displayed, try refreshing the page.*"
+      },
+      "code": {
+        "title": "Login confirmation (2FA)",
+        "description": "Open the **mos.ru** or **Gosuslugi Moscow** app and tap **\"Confirm login\"**.\n\nAfter tapping, you will receive a push notification with a 6-digit code — enter it below.",
+        "data": {
+          "sms_code": "6-digit code from the push notification"
+        }
+      },
+      "discover": {
+        "title": "Meter selection",
+        "description": "{description}",
+        "data": {
+          "cold_counter_id": "Cold water meter (ID)",
+          "hot_counter_id":  "Hot water meter (ID)",
+          "retry_discovery": "Refresh meter list"
+        }
+      },
+      "sensors": {
+        "title": "Reading sources",
+        "description": "Specify the Home Assistant sensors to take readings from (must be in m³)",
+        "data": {
+          "cold_entity": "Cold water sensor",
+          "hot_entity":  "Hot water sensor",
+          "submit_day":  "Day of the month for auto-submission"
+        }
+      }
+    },
+    "progress": {
+      "scanning": "Scan the QR code with the **mos.ru** or **Gosuslugi Moscow** app:\n\n![QR code]({qr_url})\n\n[Open QR code in a new tab]({qr_url})\n\nWaiting for scan..."
+    },
+    "error": {
+      "entity_not_found": "Sensor not found in Home Assistant",
+      "wrong_unit":       "Sensor must return a value in m³",
+      "invalid_code":     "Invalid confirmation code. Please try again.",
+      "required":         "This field is required"
+    },
+    "abort": {
+      "already_configured":  "Integration is already configured",
+      "cannot_connect":      "Failed to connect to mos.ru",
+      "cannot_get_counters": "Failed to retrieve meter list",
+      "session_expired":     "mos.ru session has expired, re-authorization is required",
+      "reauth_successful":   "Authorization updated successfully"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Settings",
+        "data": {
+          "cold_counter_id": "Cold water meter ID",
+          "hot_counter_id":  "Hot water meter ID",
+          "cold_entity":     "Cold water sensor",
+          "hot_entity":      "Hot water sensor",
+          "submit_day":      "Day of the month for auto-submission"
+        }
+      }
+    },
+    "error": {
+      "entity_not_found": "Sensor not found in Home Assistant",
+      "wrong_unit":       "Sensor must return a value in m³",
+      "required":         "This field is required"
+    }
+  }
+}
