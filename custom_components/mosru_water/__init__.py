@@ -40,8 +40,4 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Применить новые options без перезагрузки HA."""
     coordinator: MosRuWaterCoordinator = hass.data[DOMAIN][entry.entry_id]
-    entry_data = dict(entry.data)
-    if entry.options:
-        entry_data.update(entry.options)
-    coordinator.update_config(entry_data)
-    await coordinator.async_request_refresh()
+    coordinator.update_config(dict(entry.data))
