@@ -10,7 +10,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import MosRuAuthError, MosRuApiError, MosRuClient
+from .api import MosRuAuthError, MosRuApiError, MosRuClient, MosRuTemporaryError
 from .const import (
     DOMAIN,
     CONF_PAYCODE, CONF_FLAT,
@@ -111,6 +111,8 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except MosRuAuthError as err:
             self._invalidate_client()
             raise ConfigEntryAuthFailed(str(err)) from err
+        except MosRuTemporaryError:
+            raise  # обрабатывается в _async_update_data — не роняем данные
         except MosRuApiError as err:
             raise UpdateFailed(f"Ошибка получения статуса: {err}") from err
 
@@ -162,6 +164,8 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except MosRuAuthError as err:
             self._invalidate_client()
             raise ConfigEntryAuthFailed(str(err)) from err
+        except MosRuTemporaryError:
+            raise  # отправку повторит следующий цикл координатора
         except MosRuApiError as err:
             raise UpdateFailed(f"Ошибка отправки: {err}") from err
 
@@ -186,6 +190,16 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Вызывается каждый час. Всегда опрашивает статус; отправляет в нужный день."""
         try:
             device_data = await self.hass.async_add_executor_job(self._fetch_device_info)
+        except MosRuTemporaryError as err:
+            # mos.ru периодически отвечает retry_later. Ретраи внутри клиента уже
+            # исчерпаны — держим прошлые показания, чтобы сенсоры не уходили
+            # в unavailable до следующего цикла.
+            if self.data:
+                _LOGGER.warning(
+                    "mos.ru временно недоступен (%s), оставляем предыдущие данные", err
+                )
+                return self.data
+            raise UpdateFailed(f"mos.ru временно недоступен: {err}") from err
         except (UpdateFailed, ConfigEntryAuthFailed):
             raise
         except Exception as err:
@@ -211,6 +225,12 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 submit_result = await self.hass.async_add_executor_job(self._submit)
                 self._persist_cookies()
                 result.update(submit_result)
+            except MosRuTemporaryError as err:
+                # _submitted_month не выставлен — попробуем снова через час,
+                # пока день отправки не закончился.
+                _LOGGER.warning(
+                    "mos.ru временно недоступен, отправка показаний отложена: %s", err
+                )
             except (UpdateFailed, ConfigEntryAuthFailed):
                 raise
             except Exception as err:

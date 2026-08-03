@@ -10,6 +10,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
+from .api import MosRuApiError
 from .const import DOMAIN
 from .coordinator import MosRuWaterCoordinator
 from .entity import build_device_info
@@ -46,5 +47,5 @@ class MosRuWaterSubmitButton(ButtonEntity):
             self._coordinator.async_set_updated_data(merged)
         except ConfigEntryAuthFailed as err:
             _LOGGER.error("Требуется повторная авторизация: %s", err)
-        except UpdateFailed as err:
+        except (UpdateFailed, MosRuApiError) as err:
             _LOGGER.error("Ошибка ручной отправки: %s", err)

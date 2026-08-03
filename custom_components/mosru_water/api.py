@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 import urllib.parse
 from datetime import datetime
 
@@ -31,6 +32,13 @@ _USER_AGENT      = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 )
 
+# Временные сбои mos.ru: сервис отвечает 200 с {"error": true, "code": "retry_later"}
+# либо обычным 5xx. Такие ответы не означают проблем с сессией — нужен повтор.
+_TRANSIENT_STATUS  = (429, 500, 502, 503, 504)
+_TRANSIENT_CODES   = {"retry_later", "service_unavailable", "temporarily_unavailable"}
+_RETRY_ATTEMPTS    = 2    # дополнительные попытки для идемпотентных запросов
+_RETRY_DELAY       = 5    # пауза между попытками, сек
+
 
 def _parse_form(html: str) -> tuple[str, dict]:
     """Извлечь action формы и скрытые поля из HTML."""
@@ -57,6 +65,42 @@ class MosRuAuthError(Exception):
 
 class MosRuApiError(Exception):
     """Ошибка API."""
+
+
+class MosRuTemporaryError(MosRuApiError):
+    """Сервис mos.ru временно недоступен — имеет смысл повторить позже."""
+
+
+def _parse_api_response(resp: requests.Response) -> dict:
+    """Проверить HTTP-ответ API и вернуть распарсенный JSON.
+
+    Raises:
+        MosRuAuthError: сессия истекла (401/403).
+        MosRuTemporaryError: временный сбой mos.ru (5xx, 429, code=retry_later).
+        MosRuApiError: прочие ошибки.
+    """
+    if resp.status_code in (401, 403):
+        raise MosRuAuthError("Сессия истекла, требуется повторная авторизация")
+    if resp.status_code in _TRANSIENT_STATUS:
+        raise MosRuTemporaryError(
+            f"HTTP {resp.status_code}, сервис временно недоступен"
+        )
+
+    try:
+        data = resp.json()
+    except ValueError as err:
+        raise MosRuApiError("Неожиданный формат ответа") from err
+    if not isinstance(data, dict):
+        raise MosRuApiError(f"Неожиданный формат ответа: {repr(data)[:200]}")
+
+    code = str(data.get("code", "")).lower()
+    if code in _TRANSIENT_CODES:
+        raise MosRuTemporaryError(
+            data.get("message") or f"сервис временно недоступен ({code})"
+        )
+    if data.get("error") is True:
+        raise MosRuApiError(f"Ошибка API: {repr(data)[:200]}")
+    return data
 
 
 class MosRuClient:
@@ -365,6 +409,34 @@ class MosRuClient:
 
     # ── API ───────────────────────────────────────────────────────────────
 
+    def _request_json(
+        self,
+        method: str,
+        url: str,
+        *,
+        retries: int = 0,
+        **kwargs,
+    ) -> dict:
+        """Выполнить запрос к API и вернуть проверенный JSON.
+
+        retries — число дополнительных попыток при временном сбое mos.ru
+        (использовать только для идемпотентных запросов).
+        """
+        last_err = MosRuTemporaryError("Запрос не был выполнен")
+        for attempt in range(retries + 1):
+            if attempt:
+                time.sleep(_RETRY_DELAY)
+            try:
+                resp = self._session.request(method, url, timeout=_TIMEOUT, **kwargs)
+            except requests.RequestException as err:
+                last_err = MosRuTemporaryError(f"Сетевая ошибка: {err}")
+                continue
+            try:
+                return _parse_api_response(resp)
+            except MosRuTemporaryError as err:
+                last_err = err
+        raise last_err
+
     def get_counters(self, paycode: str, flat: str) -> list[dict]:
         """Получить список счётчиков из личного кабинета."""
         url = f"{_UTILITY_METER_URL}/device"
@@ -377,23 +449,9 @@ class MosRuClient:
             "Sec-Fetch-Site": "same-origin",
         }
 
-        try:
-            resp = self._session.get(
-                url,
-                params=params,
-                headers=headers,
-                timeout=_TIMEOUT,
-            )
-        except requests.RequestException as err:
-            raise MosRuApiError(f"Сетевая ошибка: {err}") from err
-
-        if resp.status_code in (401, 403):
-            raise MosRuAuthError("Сессия истекла, требуется повторная авторизация")
-
-        try:
-            data = resp.json()
-        except ValueError as err:
-            raise MosRuApiError("Неожиданный формат ответа") from err
+        data = self._request_json(
+            "GET", url, params=params, headers=headers, retries=_RETRY_ATTEMPTS
+        )
 
         if data.get("code") != "SUCCESS" or "data" not in data:
             raise MosRuApiError(f"Неожиданный ответ: {repr(data)[:200]}")
@@ -440,18 +498,9 @@ class MosRuClient:
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Site": "same-origin",
         }
-        try:
-            resp = self._session.get(url, params=params, headers=headers, timeout=_TIMEOUT)
-        except requests.RequestException as err:
-            raise MosRuApiError(f"Сетевая ошибка: {err}") from err
-
-        if resp.status_code in (401, 403):
-            raise MosRuAuthError("Сессия истекла, требуется повторная авторизация")
-
-        try:
-            data = resp.json()
-        except ValueError as err:
-            raise MosRuApiError("Неожиданный формат ответа") from err
+        data = self._request_json(
+            "GET", url, params=params, headers=headers, retries=_RETRY_ATTEMPTS
+        )
 
         if data.get("code") != "SUCCESS" or "data" not in data:
             raise MosRuApiError(f"Неожиданный ответ: {repr(data)[:200]}")
@@ -497,27 +546,18 @@ class MosRuClient:
             "indication": round(value_m3, 3),
             "period": period,
         }
-        try:
-            resp = self._session.post(
-                f"{_UTILITY_METER_URL}/reading",
-                json=payload,
-                headers={
-                    "Accept": "application/json, text/plain, */*",
-                    "Content-Type": "application/json",
-                    "Referer": _SERVICE_PAGE_URL,
-                    "Sec-Fetch-Dest": "empty",
-                    "Sec-Fetch-Mode": "cors",
-                    "Sec-Fetch-Site": "same-origin",
-                },
-                timeout=_TIMEOUT,
-            )
-        except requests.RequestException as err:
-            raise MosRuApiError(f"Сетевая ошибка: {err}") from err
-
-        if resp.status_code in (401, 403):
-            raise MosRuAuthError("Сессия истекла, требуется повторная авторизация")
-
-        try:
-            return resp.json()
-        except ValueError as err:
-            raise MosRuApiError("Неожиданный формат ответа") from err
+        # Без ретраев: повторный POST может создать дубль показания.
+        # Временный сбой поднимается наружу, отправку повторит координатор.
+        return self._request_json(
+            "POST",
+            f"{_UTILITY_METER_URL}/reading",
+            json=payload,
+            headers={
+                "Accept": "application/json, text/plain, */*",
+                "Content-Type": "application/json",
+                "Referer": _SERVICE_PAGE_URL,
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-origin",
+            },
+        )
