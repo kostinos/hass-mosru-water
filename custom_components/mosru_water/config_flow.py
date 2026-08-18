@@ -21,7 +21,7 @@ from homeassistant.components.persistent_notification import (
 from .api import MosRuAuthError, MosRuApiError, MosRuClient
 from .const import (
     DOMAIN,
-    CONF_PAYCODE, CONF_FLAT,
+    CONF_PAYCODE, CONF_FLAT, CONF_USER_PLACE_ID,
     CONF_COLD_ID, CONF_HOT_ID,
     CONF_COLD_ENTITY, CONF_HOT_ENTITY, CONF_SUBMIT_DAY,
     CONF_SESSION_COOKIES,
@@ -271,20 +271,31 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     # ── Шаг 4: выбор счётчиков ───────────────────────────────────────────
 
+    def _discover_counters(self) -> list[dict]:
+        """Войти в ed.mos.ru, определить userPlaceId и получить счётчики.
+
+        Синхронный метод для executor. userPlaceId запоминается в конфиге: это
+        идентификатор квартиры в ed.mos.ru, по нему идут все дальнейшие запросы.
+        """
+        self._client.authorize_ed()
+        user_place_id = self._client.find_user_place_id(
+            self._data[CONF_PAYCODE], self._data.get(CONF_FLAT, "")
+        )
+        self._data[CONF_USER_PLACE_ID] = user_place_id
+        return self._client.get_counters(user_place_id)
+
     async def async_step_discover(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Выбор счётчиков: автоматически из API или ручной ввод ID."""
         errors: dict[str, str] = {}
 
-        # Однократно запрашиваем список счётчиков
+        # Однократно авторизуемся в ed.mos.ru и запрашиваем список счётчиков
         if not self._counters_fetched:
             self._counters_fetched = True
             try:
                 self._counters = await self.hass.async_add_executor_job(
-                    self._client.get_counters,
-                    self._data[CONF_PAYCODE],
-                    self._data[CONF_FLAT],
+                    self._discover_counters
                 )
             except MosRuAuthError:
                 return self.async_abort(reason="session_expired")

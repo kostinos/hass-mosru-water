@@ -1,11 +1,12 @@
 """Клиент mos.ru для передачи показаний счётчиков воды."""
 from __future__ import annotations
 
+import calendar
 import logging
 import re
 import time
 import urllib.parse
-from datetime import datetime
+from datetime import date, datetime
 
 import requests
 
@@ -24,13 +25,55 @@ _QR_REFRESH_URL    = "https://login.mos.ru/sps/login/methods/headless/qrCode/ref
 _QR_COMPLETE_URL   = "https://login.mos.ru/sps/login/methods/qrCode/complete"
 _QR_ASKTOTRUST_URL = "https://login.mos.ru/sps/login/ur/askToTrust"
 _SMS_URL           = "https://login.mos.ru/sps/login/methods/sms"
-_UTILITY_METER_URL = "https://www.mos.ru/api/utility-meter/v1"
 _SERVICE_PAGE_URL  = "https://www.mos.ru/services/pokazaniya-vodi-i-tepla/new/"
+
+# ed.mos.ru (Электронный дом) — рабочий API показаний. Прежний
+# www.mos.ru/api/utility-meter/v1 не существует: POST /reading всегда отдавал 404,
+# из-за чего показания годами «отправлялись» вникуда.
+_ED_URL          = "https://ed.mos.ru"
+_ED_API          = f"{_ED_URL}/api"
+_ED_COUNTERS     = f"{_ED_API}/efp/counters"
+_ED_PAGE_URL     = f"{_ED_URL}/lk/counters/"
+# OAuth ed.mos.ru: при живой SSO-сессии проходит молча, без ввода пароля.
+_ED_REDIRECT_URI = f"{_ED_URL}/security/callback/sudir/login"
+_ED_OAUTH_URL    = (
+    "https://login.mos.ru/sps/oauth/ae"
+    "?scope=openid+profile"
+    "&access_type=offline"
+    "&response_type=code"
+    f"&redirect_uri={_ED_REDIRECT_URI}"
+    "&client_id=ed.mos.ru"
+)
 _TIMEOUT         = 30
 _USER_AGENT      = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
 )
+# my.mos.ru и ed.mos.ru отдают 403 без полного набора браузерных заголовков —
+# антибот смотрит именно на них, а не на cookies.
+_BROWSER_HINTS   = {
+    "Accept-Language": "ru,en;q=0.9",
+    "sec-ch-ua": '"Chromium";v="148", "Not/A)Brand";v="99"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"macOS"',
+}
+_XHR_HEADERS     = {
+    **_BROWSER_HINTS,
+    "Accept": "application/json, text/plain, */*",
+    "Referer": _ED_PAGE_URL,
+    "Origin": _ED_URL,
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
+}
+_NAV_HEADERS     = {
+    **_BROWSER_HINTS,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Upgrade-Insecure-Requests": "1",
+}
 
 # Временные сбои mos.ru: сервис отвечает 200 с {"error": true, "code": "retry_later"}
 # либо обычным 5xx. Такие ответы не означают проблем с сессией — нужен повтор.
@@ -38,6 +81,17 @@ _TRANSIENT_STATUS  = (429, 500, 502, 503, 504)
 _TRANSIENT_CODES   = {"retry_later", "service_unavailable", "temporarily_unavailable"}
 _RETRY_ATTEMPTS    = 2    # дополнительные попытки для идемпотентных запросов
 _RETRY_DELAY       = 5    # пауза между попытками, сек
+
+
+def _period_end_of_month(today: date | None = None) -> str:
+    """Последний день текущего месяца в формате YYYY-MM-DD.
+
+    ed.mos.ru привязывает показание к расчётному периоду, а не к дате отправки:
+    в запросе всегда стоит конец месяца (например 2026-08-31).
+    """
+    day = today or date.today()
+    last = calendar.monthrange(day.year, day.month)[1]
+    return day.replace(day=last).isoformat()
 
 
 def _parse_form(html: str) -> tuple[str, dict]:
@@ -71,6 +125,16 @@ class MosRuTemporaryError(MosRuApiError):
     """Сервис mos.ru временно недоступен — имеет смысл повторить позже."""
 
 
+class MosRuAlreadySubmittedError(MosRuApiError):
+    """Показание за этот период уже внесено на портале.
+
+    ed.mos.ru отвечает 400 «Показание за данный период уже внесено» и не
+    перезаписывает значение. Чтобы заменить его, нужно сначала удалить прежнее
+    через remove_last_indication() — это делается только по явной команде
+    пользователя, автоматика показания не удаляет.
+    """
+
+
 def _parse_api_response(resp: requests.Response) -> dict:
     """Проверить HTTP-ответ API и вернуть распарсенный JSON.
 
@@ -98,6 +162,19 @@ def _parse_api_response(resp: requests.Response) -> dict:
         raise MosRuTemporaryError(
             data.get("message") or f"сервис временно недоступен ({code})"
         )
+    # ed.mos.ru сообщает об ошибке в поле "error" строкой, а не флагом.
+    err_text = data.get("error") if isinstance(data.get("error"), str) else None
+    if err_text and "уже внесено" in err_text:
+        raise MosRuAlreadySubmittedError(err_text)
+    # Прочие HTTP-ошибки (404 на неверный эндпоинт, 400 на плохой payload и т.п.).
+    # Проверяем после разбора JSON, чтобы включить в сообщение текст от сервера.
+    if not resp.ok:
+        raise MosRuApiError(
+            f"HTTP {resp.status_code}: "
+            f"{err_text or data.get('message') or repr(data)[:200]}"
+        )
+    if err_text:
+        raise MosRuApiError(f"Ошибка API: {err_text}")
     if data.get("error") is True:
         raise MosRuApiError(f"Ошибка API: {repr(data)[:200]}")
     return data
@@ -437,127 +514,177 @@ class MosRuClient:
                 last_err = err
         raise last_err
 
-    def get_counters(self, paycode: str, flat: str) -> list[dict]:
-        """Получить список счётчиков из личного кабинета."""
-        url = f"{_UTILITY_METER_URL}/device"
-        params = {"flat": flat, "payer_code": paycode}
-        headers = {
-            "Accept": "application/json, text/plain, */*",
-            "Referer": _SERVICE_PAGE_URL,
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-origin",
-        }
+    # ── ed.mos.ru ─────────────────────────────────────────────────────────
 
+    def authorize_ed(self) -> None:
+        """Авторизоваться в ed.mos.ru поверх действующей SSO-сессии mos.ru.
+
+        При живом Ltpatoken2 OAuth проходит молча: login.mos.ru редиректит на
+        callback с ?code=, который обменивается на сессионную cookie ed.mos.ru.
+        Дальше все запросы к API идут по cookies, без токенов в query.
+        """
+        try:
+            resp = self._session.get(
+                _ED_OAUTH_URL,
+                headers=_NAV_HEADERS,
+                allow_redirects=True,
+                timeout=_TIMEOUT,
+            )
+        except requests.RequestException as err:
+            raise MosRuTemporaryError(f"Сетевая ошибка при входе в ed.mos.ru: {err}") from err
+
+        code_m = re.search(r"[?&]code=([^&]+)", resp.url)
+        if not code_m:
+            # Сессия SSO истекла — цепочка ушла на форму логина вместо callback.
+            raise MosRuAuthError("Не удалось авторизоваться в ed.mos.ru: код не получен")
+
+        try:
+            auth = self._session.post(
+                f"{_ED_API}/profile/auth/web",
+                params={"code": code_m.group(1)},
+                headers={**_XHR_HEADERS, "Referer": resp.url},
+                timeout=_TIMEOUT,
+            )
+        except requests.RequestException as err:
+            raise MosRuTemporaryError(f"Сетевая ошибка ed.mos.ru auth: {err}") from err
+
+        if auth.status_code in (401, 403):
+            raise MosRuAuthError("ed.mos.ru отклонил авторизацию")
+        if not auth.ok:
+            raise MosRuApiError(f"ed.mos.ru auth: HTTP {auth.status_code}")
+
+    def _counters_payload(self, user_place_id: str) -> list[dict]:
+        """Сырой ответ listByPayerCode: список квартир со счётчиками."""
         data = self._request_json(
-            "GET", url, params=params, headers=headers, retries=_RETRY_ATTEMPTS
+            "GET",
+            f"{_ED_COUNTERS}/listByPayerCode/",
+            params={"userPlaceIds": user_place_id},
+            headers=_XHR_HEADERS,
+            retries=_RETRY_ATTEMPTS,
+        )
+        places = data.get("data")
+        if not isinstance(places, list):
+            raise MosRuApiError(f"Неожиданный ответ: {repr(data)[:200]}")
+        return places
+
+    def find_user_place_id(self, paycode: str, flat: str) -> str:
+        """Определить userPlaceId по коду плательщика — для мастера настройки.
+
+        ed.mos.ru адресует квартиру своим userPlaceId, а не paycode. Профиль
+        пользователя перечисляет квартиры в data.addresses; в каждой записи есть
+        fls (это и есть код плательщика), flat и userPlaceId.
+        """
+        data = self._request_json(
+            "GET",
+            f"{_ED_API}/profile/user/getInfo/",
+            headers=_XHR_HEADERS,
+            retries=_RETRY_ATTEMPTS,
+        )
+        addresses = (data.get("data") or {}).get("addresses") or []
+        for place in addresses:
+            if not isinstance(place, dict):
+                continue
+            # flat в ответе — число, paycode тоже: сравниваем как строки
+            if str(place.get("fls") or "") != str(paycode):
+                continue
+            if flat and str(place.get("flat") or "") != str(flat):
+                continue
+            upid = place.get("userPlaceId")
+            if upid:
+                return str(upid)
+        raise MosRuApiError(
+            f"В профиле ed.mos.ru не найдена квартира с кодом плательщика {paycode}"
         )
 
-        if data.get("code") != "SUCCESS" or "data" not in data:
-            raise MosRuApiError(f"Неожиданный ответ: {repr(data)[:200]}")
-
-        payload = data["data"]
-        # Devices with warnings (e.g. upcoming inspection) land in top-level
-        # "errors" as {"device": {...}} instead of data.active — collect both.
-        devices = list(payload.get("active", []))
-        for err_item in data.get("errors", []):
-            dev = err_item.get("device") if isinstance(err_item, dict) else None
-            if dev:
-                devices.append(dev)
-        devices += payload.get("inactive", [])
-
-        result = []
-        seen: set[str] = set()
-        for c in devices:
-            model = c.get("model", {})
-            if model.get("class") != "water":
-                continue
-            dev_id = str(c.get("id", ""))
-            if dev_id in seen:
-                continue
-            seen.add(dev_id)
-            result.append({
-                "id":   dev_id,
-                "name": c.get("number", ""),
-                "type": model.get("type", ""),
-            })
+    def get_counters(self, user_place_id: str) -> list[dict]:
+        """Список счётчиков воды для мастера настройки."""
+        result: list[dict] = []
+        for place in self._counters_payload(user_place_id):
+            for c in place.get("activeCounters") or []:
+                counter_id = str(c.get("counterId") or "")
+                if not counter_id:
+                    continue
+                result.append({
+                    "id":   counter_id,
+                    "name": c.get("num", ""),
+                    "type": c.get("typeName", ""),   # ХВС / ГВС
+                })
         return result
 
-    def get_device_info(self, paycode: str, flat: str) -> dict[str, dict]:
-        """Получить текущий статус счётчиков: показания, поверка, доступность отправки.
+    def get_device_info(self, user_place_id: str) -> dict[str, dict]:
+        """Текущий статус счётчиков: показания, поверка, доступность отправки.
 
-        Returns: {device_id: {type, number, current_reading, reading_period,
+        Returns: {counter_id: {type, number, current_reading, reading_period,
                                readonly, inspection_date, inspection_status}}
         """
-        url = f"{_UTILITY_METER_URL}/device"
-        params = {"flat": flat, "payer_code": paycode}
-        headers = {
-            "Accept": "application/json, text/plain, */*",
-            "Referer": _SERVICE_PAGE_URL,
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-origin",
-        }
-        data = self._request_json(
-            "GET", url, params=params, headers=headers, retries=_RETRY_ATTEMPTS
-        )
-
-        if data.get("code") != "SUCCESS" or "data" not in data:
-            raise MosRuApiError(f"Неожиданный ответ: {repr(data)[:200]}")
-
-        payload = data["data"]
-        devices = list(payload.get("active", []))
-        for err_item in data.get("errors", []):
-            dev = err_item.get("device") if isinstance(err_item, dict) else None
-            if dev:
-                devices.append(dev)
-
         result: dict[str, dict] = {}
-        for c in devices:
-            model = c.get("model", {})
-            if model.get("class") != "water":
-                continue
-            dev_id = str(c.get("id", ""))
-            if not dev_id or dev_id in result:
-                continue
-            rr = c.get("recent_reading") or {}
-            result[dev_id] = {
-                "type":               model.get("type", ""),
-                "number":             c.get("number", ""),
-                "current_reading":    rr.get("indication"),
-                "reading_period":     rr.get("period"),
-                "readonly":           rr.get("readonly", False),
-                "inspection_date":    c.get("inspection_date"),
-                "inspection_status":  c.get("inspection_status", ""),
-            }
+        for place in self._counters_payload(user_place_id):
+            for c in place.get("activeCounters") or []:
+                counter_id = str(c.get("counterId") or "")
+                if not counter_id or counter_id in result:
+                    continue
+                last = c.get("lastIndication") or {}
+                result[counter_id] = {
+                    "type":              c.get("typeName", ""),
+                    "number":            c.get("num", ""),
+                    "current_reading":   last.get("indication"),
+                    "reading_period":    last.get("period"),
+                    # enableTransfer=False — портал сейчас не принимает показания
+                    "readonly":          not c.get("enableTransfer", True),
+                    "inspection_date":   c.get("checkUpDate"),
+                    "inspection_status": c.get("checkupStatus", ""),
+                }
         return result
 
     def send_reading(
         self,
-        paycode: str,
-        flat: str,
+        user_place_id: str,
         counter_id: str,
         value_m3: float,
+        period: str | None = None,
     ) -> dict:
-        """Передать показание счётчика (в м³)."""
-        period = datetime.now().strftime("%Y-%m-%d")
-        payload = {
-            "device_id": counter_id,
-            "indication": round(value_m3, 3),
-            "period": period,
-        }
-        # Без ретраев: повторный POST может создать дубль показания.
-        # Временный сбой поднимается наружу, отправку повторит координатор.
-        return self._request_json(
-            "POST",
-            f"{_UTILITY_METER_URL}/reading",
-            json=payload,
-            headers={
-                "Accept": "application/json, text/plain, */*",
-                "Content-Type": "application/json",
-                "Referer": _SERVICE_PAGE_URL,
-                "Sec-Fetch-Dest": "empty",
-                "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Site": "same-origin",
+        """Передать показание счётчика (в м³).
+
+        period — конец расчётного месяца (YYYY-MM-DD), как ждёт портал; по
+        умолчанию последний день текущего месяца.
+        Значение уходит целым числом: портал принимает только целые м³.
+
+        Raises:
+            MosRuAlreadySubmittedError: за этот период показание уже внесено.
+        """
+        # Без ретраев: повтор может создать дубль. Временный сбой поднимается
+        # наружу, отправку повторит координатор.
+        data = self._request_json(
+            "PUT",
+            f"{_ED_COUNTERS}/addIndications/",
+            params={
+                "userPlaceId": user_place_id,
+                "counterId": counter_id,
+                "indication": int(round(value_m3)),
+                "period": period or _period_end_of_month(),
             },
+            headers=_XHR_HEADERS,
         )
+        if not (data.get("data") or {}).get("result"):
+            raise MosRuApiError(f"Показание не принято: {repr(data)[:200]}")
+        return data
+
+    def remove_last_indication(self, user_place_id: str, counter_id: str) -> dict:
+        """Удалить последнее показание счётчика на портале.
+
+        Нужно, чтобы перезаписать показание за уже закрытый период: сам
+        addIndications значение не заменяет, а отвечает 400.
+
+        Вызывается ТОЛЬКО по явной команде пользователя: удаляется последнее
+        показание независимо от того, кто его внёс (портал помечает источник в
+        поле source — запись могла прийти от управляющей компании).
+        """
+        data = self._request_json(
+            "DELETE",
+            f"{_ED_COUNTERS}/removeLastValue/",
+            params={"counterId": counter_id, "userPlaceId": user_place_id},
+            headers=_XHR_HEADERS,
+        )
+        if not (data.get("data") or {}).get("result"):
+            raise MosRuApiError(f"Показание не удалено: {repr(data)[:200]}")
+        return data

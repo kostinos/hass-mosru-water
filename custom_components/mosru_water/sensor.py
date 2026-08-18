@@ -1,13 +1,14 @@
 """Сенсоры mosru_water."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 from homeassistant.components.sensor import SensorEntity, SensorDeviceClass, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, UNIT_M3
 from .coordinator import MosRuWaterCoordinator
@@ -96,8 +97,21 @@ class MosRuWaterDateSensor(CoordinatorEntity[MosRuWaterCoordinator], SensorEntit
         self._attr_device_info = device_info
 
     @property
-    def native_value(self) -> str | None:
-        return (self.coordinator.data or {}).get("last_submitted_at")
+    def native_value(self) -> datetime | None:
+        raw = (self.coordinator.data or {}).get("last_submitted_at")
+        if isinstance(raw, datetime):
+            return dt_util.as_local(raw) if raw.tzinfo else raw.replace(
+                tzinfo=dt_util.DEFAULT_TIME_ZONE
+            )
+        if isinstance(raw, str):
+            # Значения, записанные прошлыми версиями: naive ISO-строка.
+            parsed = dt_util.parse_datetime(raw)
+            if parsed is None:
+                return None
+            return parsed if parsed.tzinfo else parsed.replace(
+                tzinfo=dt_util.DEFAULT_TIME_ZONE
+            )
+        return None
 
 
 class MosRuWaterInspectionSensor(CoordinatorEntity[MosRuWaterCoordinator], SensorEntity):
