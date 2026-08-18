@@ -16,5 +16,6 @@ def build_device_info(entry: ConfigEntry) -> DeviceInfo:
         manufacturer="Портал mos.ru",
         model="Счётчики воды",
         entry_type=DeviceEntryType.SERVICE,
-        configuration_url="https://www.mos.ru/services/pokazaniya-vodi-i-tepla/new/",
+        # Ведёт туда, куда интеграция реально пишет показания
+        configuration_url="https://ed.mos.ru/lk/counters/",
     )
