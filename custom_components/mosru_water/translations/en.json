@@ -40,7 +40,7 @@
       }
     },
     "progress": {
-      "scanning": "Scan the QR code with the **mos.ru** or **Gosuslugi Moscow** app:\n\n![QR code]({qr_url})\n\n[Open QR code in a new tab]({qr_url})\n\nWaiting for scan..."
+      "scanning": "Scan the QR code with the **mos.ru** or **Gosuslugi Moscow** app:\n\n![QR code]({qr_url})\n\n[Open QR code in a new tab]({qr_link})\n\nWaiting for scan..."
     },
     "error": {
       "entity_not_found": "Sensor not found in Home Assistant",

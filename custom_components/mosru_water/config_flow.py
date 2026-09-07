@@ -30,6 +30,7 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+_AUTH_SETTINGS_URL = "/config/integrations/integration/mosru_water"
 _QR_FILE = "mosru_water_qr.svg"
 _QR_POLL_SECONDS = 150  # максимальное время ожидания сканирования
 
@@ -123,24 +124,17 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 _write_qr_svg, www_dir, self._qr_link, ts
             )
             self._qr_task = self.hass.async_create_task(self._poll_qr_scan())
-            pn_create(
-                self.hass,
-                message=(
-                    f"Отсканируйте QR-код приложением **mos.ru** "
-                    f"или **Госуслуги Москвы**:\n\n"
-                    f"![QR-код]({self._qr_url})\n\n"
-                    f"[Открыть QR-код в новой вкладке]({self._qr_link})"
-                ),
-                title="MOS.RU Water: Авторизация",
-                notification_id="mosru_water_qr",
-            )
+            self._notify_qr_auth()
 
         if not self._qr_task.done():
             return self.async_show_progress(
                 step_id="qr",
                 progress_action="scanning",
                 progress_task=self._qr_task,
-                description_placeholders={"qr_url": self._qr_url},
+                description_placeholders={
+                    "qr_url": self._qr_url,
+                    "qr_link": self._qr_link,
+                },
             )
 
         # Задача завершена
@@ -153,7 +147,16 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._qr_task = None
 
         if result == "code_required":
-            pn_dismiss(self.hass, notification_id="mosru_water_qr")
+            pn_create(
+                self.hass,
+                message=(
+                    "Подтвердите вход в приложении mos.ru, затем введите "
+                    "код из пуш-уведомления в Home Assistant.\n\n"
+                    f"[Продолжить авторизацию]({_AUTH_SETTINGS_URL})"
+                ),
+                title="MOS.RU Water: Подтверждение входа",
+                notification_id="mosru_water_qr",
+            )
             return self.async_show_progress_done(next_step_id="code")
 
         if not result:
@@ -170,13 +173,27 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._data[CONF_SESSION_COOKIES] = cookies
 
         if self._reauth_entry is not None:
-            self.hass.config_entries.async_update_entry(
+            return self.async_update_reload_and_abort(
                 self._reauth_entry,
-                data={**self._reauth_entry.data, CONF_SESSION_COOKIES: cookies},
+                data_updates={CONF_SESSION_COOKIES: cookies},
             )
-            return self.async_abort(reason="reauth_successful")
 
         return self.async_show_progress_done(next_step_id="discover")
+
+    def _notify_qr_auth(self) -> None:
+        """Показать актуальную ссылку подтверждения той же сессии, что в QR."""
+        prefix = "Сессия mos.ru истекла. " if self._reauth_entry is not None else ""
+        pn_create(
+            self.hass,
+            message=(
+                f"{prefix}Подтвердите вход на mos.ru:\n\n"
+                f"[Подтвердить вход]({self._qr_link})\n\n"
+                "Или отсканируйте QR-код приложением **mos.ru** "
+                f"или **Госуслуги Москвы**:\n\n![QR-код]({self._qr_url})"
+            ),
+            title="MOS.RU Water: Авторизация",
+            notification_id="mosru_water_qr",
+        )
 
     async def _poll_qr_scan(self) -> bool:
         """Фоновая задача: опросить QR до сканирования или истечения."""
@@ -215,6 +232,7 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     self._qr_url = await self.hass.async_add_executor_job(
                         _write_qr_svg, www_dir, self._qr_link, ts
                     )
+                    self._notify_qr_auth()
                 except MosRuApiError:
                     return False
                 continue
@@ -247,13 +265,13 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     self._client.get_session_cookies
                 )
                 self._data[CONF_SESSION_COOKIES] = cookies
+                pn_dismiss(self.hass, notification_id="mosru_water_qr")
 
                 if self._reauth_entry is not None:
-                    self.hass.config_entries.async_update_entry(
+                    return self.async_update_reload_and_abort(
                         self._reauth_entry,
-                        data={**self._reauth_entry.data, CONF_SESSION_COOKIES: cookies},
+                        data_updates={CONF_SESSION_COOKIES: cookies},
                     )
-                    return self.async_abort(reason="reauth_successful")
 
                 return await self.async_step_discover()
 
