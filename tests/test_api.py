@@ -334,5 +334,31 @@ class AuthorizeEdTest(unittest.TestCase):
             self.client.authorize_ed()
 
 
+class SessionNetworkTest(unittest.TestCase):
+    def setUp(self):
+        self.client = MosRuClient()
+        self.session = mock.Mock()
+        self.client._session = self.session
+
+    def test_probe_timeout_is_temporary(self):
+        self.session.get.side_effect = api.requests.Timeout()
+        with self.assertRaises(MosRuTemporaryError): self.client.try_refresh_acst()
+
+    def test_probe_503_is_temporary(self):
+        self.session.get.return_value = mock.Mock(status_code=503, url="https://www.mos.ru/error")
+        with self.assertRaises(MosRuTemporaryError): self.client.try_refresh_acst()
+
+    def test_oauth_503_does_not_request_qr(self):
+        self.session.get.return_value = mock.Mock(status_code=503, url="https://login.mos.ru/error")
+        with self.assertRaises(MosRuTemporaryError): self.client.authorize_ed()
+        self.session.post.assert_not_called()
+
+    def test_auth_503_is_temporary(self):
+        self.session.get.return_value = mock.Mock(status_code=200,
+            url="https://ed.mos.ru/security/callback/sudir/login?code=test")
+        self.session.post.return_value = FakeResponse(503, {})
+        with self.assertRaises(MosRuTemporaryError): self.client.authorize_ed()
+
+
 if __name__ == "__main__":
     unittest.main()

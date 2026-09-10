@@ -431,10 +431,11 @@ class MosRuClient:
                 allow_redirects=True,
                 timeout=_TIMEOUT,
             )
+            if resp.status_code in _TRANSIENT_STATUS:
+                raise MosRuTemporaryError(f"Обновление acst: HTTP {resp.status_code}")
             return "status=200" in resp.url
         except requests.RequestException as err:
-            _LOGGER.warning("try_refresh_acst failed: %s", err)
-            return False
+            raise MosRuTemporaryError("Сетевая ошибка при обновлении acst") from err
 
     def warm_session(self) -> None:
         """GET главной и /pgu/ mos.ru — инициализирует сессии портала после OAuth."""
@@ -533,6 +534,9 @@ class MosRuClient:
         except requests.RequestException as err:
             raise MosRuTemporaryError(f"Сетевая ошибка при входе в ed.mos.ru: {err}") from err
 
+        if resp.status_code in _TRANSIENT_STATUS:
+            raise MosRuTemporaryError(f"ed.mos.ru OAuth: HTTP {resp.status_code}")
+
         code_m = re.search(r"[?&]code=([^&]+)", resp.url)
         if not code_m:
             # Сессия SSO истекла — цепочка ушла на форму логина вместо callback.
@@ -548,6 +552,8 @@ class MosRuClient:
         except requests.RequestException as err:
             raise MosRuTemporaryError(f"Сетевая ошибка ed.mos.ru auth: {err}") from err
 
+        if auth.status_code in _TRANSIENT_STATUS:
+            raise MosRuTemporaryError(f"ed.mos.ru auth: HTTP {auth.status_code}")
         if auth.status_code in (401, 403):
             raise MosRuAuthError("ed.mos.ru отклонил авторизацию")
         if not auth.ok:

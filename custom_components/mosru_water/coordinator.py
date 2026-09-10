@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -25,7 +26,8 @@ from .const import (
     CONF_COLD_ID, CONF_HOT_ID,
     CONF_COLD_ENTITY, CONF_HOT_ENTITY, CONF_SUBMIT_DAY,
     CONF_SESSION_COOKIES,
-    UPDATE_INTERVAL_HOURS,
+    UPDATE_INTERVAL_MINUTES,
+    ED_SESSION_REFRESH_SECONDS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -38,16 +40,15 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._entry = entry
         self._submitted_month: str | None = None
         self._client: MosRuClient | None = None
-        # Сессия ed.mos.ru живёт вместе с клиентом: повторный OAuth на каждый
-        # запрос не нужен, сбрасывается вместе с клиентом.
-        self._ed_authorized = False
+        # Authorization ed.mos.ru expires after one hour independently of acst.
+        self._ed_authorized_at: float | None = None
         self._pending_user_place_id: str | None = None
 
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=timedelta(hours=UPDATE_INTERVAL_HOURS),
+            update_interval=timedelta(minutes=UPDATE_INTERVAL_MINUTES),
         )
 
     def _current_month(self) -> str:
@@ -75,7 +76,7 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _invalidate_client(self) -> None:
         """Сбросить кешированный клиент (вызывать при ошибке авторизации)."""
         self._client = None
-        self._ed_authorized = False
+        self._ed_authorized_at = None
 
     def _prepare_client(self) -> tuple[MosRuClient, str]:
         """Подготовить клиент к работе с ed.mos.ru и вернуть его с userPlaceId.
@@ -93,13 +94,15 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "Сессия mos.ru истекла, требуется повторная авторизация"
             )
 
-        if not self._ed_authorized:
+        if (self._ed_authorized_at is None
+                or time.monotonic() - self._ed_authorized_at >= ED_SESSION_REFRESH_SECONDS):
             try:
                 client.authorize_ed()
             except MosRuAuthError as err:
                 self._invalidate_client()
                 raise ConfigEntryAuthFailed(str(err)) from err
-            self._ed_authorized = True
+            self._ed_authorized_at = time.monotonic()
+            _LOGGER.debug("Сессия ed.mos.ru обновлена через mos.ru")
 
         cfg = self._get_effective_config()
         user_place_id = cfg.get(CONF_USER_PLACE_ID)
@@ -160,7 +163,14 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         client, user_place_id = self._prepare_client()
 
         try:
-            device_map = client.get_device_info(user_place_id)
+            try:
+                device_map = client.get_device_info(user_place_id)
+            except MosRuAuthError:
+                # Reading is safe to repeat; never retry PUT/DELETE this way.
+                _LOGGER.info("Сессия ed.mos.ru отклонена; восстанавливаем перед повторным чтением")
+                self._ed_authorized_at = None
+                client, user_place_id = self._prepare_client()
+                device_map = client.get_device_info(user_place_id)
         except MosRuAuthError as err:
             self._invalidate_client()
             raise ConfigEntryAuthFailed(str(err)) from err
@@ -270,7 +280,7 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         }
 
     async def _async_update_data(self) -> dict[str, Any]:
-        """Вызывается каждый час. Всегда опрашивает статус; отправляет в нужный день."""
+        """Вызывается каждые 45 минут. Всегда опрашивает статус; отправляет в нужный день."""
         try:
             device_data = await self.hass.async_add_executor_job(self._fetch_device_info)
         except MosRuTemporaryError as err:
