@@ -6,7 +6,7 @@
         "description": "Enter the data from your utility bill. Authorization on mos.ru will be performed via a QR code in the next step.",
         "data": {
           "paycode": "Payer code (EPD, 10 digits)",
-          "flat":    "Apartment number"
+          "flat": "Apartment number"
         }
       },
       "qr": {
@@ -25,7 +25,7 @@
         "description": "{description}",
         "data": {
           "cold_counter_id": "Cold water meter (ID)",
-          "hot_counter_id":  "Hot water meter (ID)",
+          "hot_counter_id": "Hot water meter (ID)",
           "retry_discovery": "Refresh meter list"
         }
       },
@@ -34,8 +34,8 @@
         "description": "Specify the Home Assistant sensors to take readings from (must be in m³)",
         "data": {
           "cold_entity": "Cold water sensor",
-          "hot_entity":  "Hot water sensor",
-          "submit_day":  "Day of the month for auto-submission"
+          "hot_entity": "Hot water sensor",
+          "submit_day": "Day of the month for auto-submission"
         }
       }
     },
@@ -44,35 +44,50 @@
     },
     "error": {
       "entity_not_found": "Sensor not found in Home Assistant",
-      "wrong_unit":       "Sensor must return a value in m³",
-      "invalid_code":     "Invalid confirmation code. Please try again.",
-      "required":         "This field is required"
+      "wrong_unit": "Sensor must return a value in m³",
+      "invalid_code": "Invalid confirmation code. Please try again.",
+      "required": "This field is required"
     },
     "abort": {
-      "already_configured":  "Integration is already configured",
-      "cannot_connect":      "Failed to connect to mos.ru",
+      "already_configured": "Integration is already configured",
+      "cannot_connect": "Failed to connect to mos.ru",
       "cannot_get_counters": "Failed to retrieve meter list",
-      "session_expired":     "mos.ru session has expired, re-authorization is required",
-      "reauth_successful":   "Authorization updated successfully"
+      "session_expired": "mos.ru session has expired, re-authorization is required",
+      "reauth_successful": "Authorization updated successfully"
     }
   },
   "options": {
     "step": {
-      "init": {
+      "settings": {
         "title": "Settings",
         "data": {
           "cold_counter_id": "Cold water meter ID",
-          "hot_counter_id":  "Hot water meter ID",
-          "cold_entity":     "Cold water sensor",
-          "hot_entity":      "Hot water sensor",
-          "submit_day":      "Day of the month for auto-submission"
+          "hot_counter_id": "Hot water meter ID",
+          "cold_entity": "Cold water sensor",
+          "hot_entity": "Hot water sensor",
+          "submit_day": "Day of the month for auto-submission"
         }
+      },
+      "init": {
+        "title": "MOS.RU Water Meter",
+        "menu_options": {
+          "settings": "Settings",
+          "logout": "Sign out and sign in again"
+        }
+      },
+      "logout": {
+        "title": "Sign out of mos.ru in Home Assistant",
+        "description": "The saved session will be removed and updates and submissions will stop until you sign in again using a QR code. Your meters, sensors and submission schedule will be kept. This does not sign you out on other devices."
       }
     },
     "error": {
       "entity_not_found": "Sensor not found in Home Assistant",
-      "wrong_unit":       "Sensor must return a value in m³",
-      "required":         "This field is required"
+      "wrong_unit": "Sensor must return a value in m³",
+      "required": "This field is required"
+    },
+    "abort": {
+      "logout_failed": "Could not stop the integration. The session was not removed.",
+      "reauth_started": "Signed out. Continue signing in from the integration page or the MOS.RU Water notification."
     }
   }
 }

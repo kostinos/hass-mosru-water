@@ -1,8 +1,11 @@
 {
   "domain": "mosru_water",
   "name": "MOS.RU Water Meter",
-  "version": "2026.9.7",
-  "requirements": ["requests>=2.28", "qrcode>=7.4"],
+  "version": "2026.9.10",
+  "requirements": [
+    "requests>=2.28",
+    "qrcode>=7.4"
+  ],
   "dependencies": [],
   "codeowners": [],
   "iot_class": "cloud_polling",

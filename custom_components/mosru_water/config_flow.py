@@ -182,7 +182,7 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     def _notify_qr_auth(self) -> None:
         """Показать актуальную ссылку подтверждения той же сессии, что в QR."""
-        prefix = "Сессия mos.ru истекла. " if self._reauth_entry is not None else ""
+        prefix = "Требуется повторный вход в mos.ru. " if self._reauth_entry is not None else ""
         pn_create(
             self.hass,
             message=(
@@ -456,6 +456,32 @@ class MosRuWaterOptionsFlow(config_entries.OptionsFlow):
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
+        return self.async_show_menu(
+            step_id="init", menu_options=["settings", "logout"]
+        )
+
+    async def async_step_logout(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Forget the local session and start HA's existing reauth flow."""
+        if user_input is None:
+            return self.async_show_form(step_id="logout", data_schema=vol.Schema({}))
+
+        # Stop polling and release the in-memory client before clearing cookies.
+        if not await self.hass.config_entries.async_unload(self._entry.entry_id):
+            return self.async_abort(reason="logout_failed")
+
+        data = dict(self._entry.data)
+        data[CONF_SESSION_COOKIES] = {}
+        # This identifier belongs to the old ed.mos.ru profile; rediscover it.
+        data.pop(CONF_USER_PLACE_ID, None)
+        self.hass.config_entries.async_update_entry(self._entry, data=data)
+        self._entry.async_start_reauth(self.hass)
+        return self.async_abort(reason="reauth_started")
+
+    async def async_step_settings(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
         errors: dict[str, str] = {}
         data = {**self._entry.data, **self._entry.options}
 
@@ -473,7 +499,7 @@ class MosRuWaterOptionsFlow(config_entries.OptionsFlow):
                 return self.async_create_entry(title="", data=user_input)
 
         return self.async_show_form(
-            step_id="init",
+            step_id="settings",
             data_schema=vol.Schema({
                 vol.Optional(
                     CONF_COLD_ID, default=data.get(CONF_COLD_ID, "")
