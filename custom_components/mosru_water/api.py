@@ -646,12 +646,13 @@ class MosRuClient:
             raise MosRuApiError(f"Неожиданный ответ: {repr(data)[:200]}")
         return places
 
-    def find_user_place_id(self, paycode: str, flat: str) -> str:
-        """Определить userPlaceId по коду плательщика — для мастера настройки.
+    def list_places(self) -> list[dict]:
+        """Квартиры из профиля ed.mos.ru — для выбора в мастере настройки.
 
-        ed.mos.ru адресует квартиру своим userPlaceId, а не paycode. Профиль
-        пользователя перечисляет квартиры в data.addresses; в каждой записи есть
-        fls (это и есть код плательщика), flat и userPlaceId.
+        Профиль перечисляет квартиры в data.addresses: fls (код плательщика),
+        flat, userPlaceId и готовая строка адреса дома addressCaption.
+
+        Returns: [{user_place_id, paycode, flat, address}] — все значения строки.
         """
         data = self._request_json(
             "GET",
@@ -659,18 +660,37 @@ class MosRuClient:
             headers=_XHR_HEADERS,
             retries=_RETRY_ATTEMPTS,
         )
-        addresses = (data.get("data") or {}).get("addresses") or []
-        for place in addresses:
-            if not isinstance(place, dict):
+        result: list[dict] = []
+        seen: set[str] = set()
+        for place in (data.get("data") or {}).get("addresses") or []:
+            if not isinstance(place, dict) or not place.get("userPlaceId"):
                 continue
-            # flat в ответе — число, paycode тоже: сравниваем как строки
-            if str(place.get("fls") or "") != str(paycode):
+            user_place_id = str(place["userPlaceId"])
+            if user_place_id in seen:
                 continue
-            if flat and str(place.get("flat") or "") != str(flat):
+            seen.add(user_place_id)
+            result.append({
+                "user_place_id": user_place_id,
+                # flat и fls приходят то строкой, то числом
+                "paycode": str(place.get("fls") or ""),
+                "flat": str(place.get("flat") or ""),
+                "address": str(place.get("addressCaption") or place.get("caption") or ""),
+            })
+        return result
+
+    def find_user_place_id(self, paycode: str, flat: str) -> str:
+        """Определить userPlaceId по коду плательщика и номеру квартиры.
+
+        ed.mos.ru адресует квартиру своим userPlaceId, а не paycode. Нужен
+        координатору: после «Выйти и войти заново» userPlaceId ищется заново
+        по сохранённым реквизитам.
+        """
+        for place in self.list_places():
+            if place["paycode"] != str(paycode):
                 continue
-            upid = place.get("userPlaceId")
-            if upid:
-                return str(upid)
+            if flat and place["flat"] != str(flat):
+                continue
+            return place["user_place_id"]
         raise MosRuApiError(
             f"В профиле ed.mos.ru не найдена квартира с кодом плательщика {paycode}"
         )

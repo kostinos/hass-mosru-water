@@ -300,6 +300,51 @@ class FindUserPlaceIdTest(unittest.TestCase):
             self.client.find_user_place_id("1730249056", "218")
 
 
+# Ответ getInfo с полями, которые нужны для выбора квартиры (ключи — из живого ответа).
+_PLACES_PAYLOAD = {
+    "data": {
+        "addresses": [
+            {"userPlaceId": 3395115, "fls": "1344364128", "flat": "46",
+             "addressCaption": "ул. Тестовая, д. 1", "caption": "Дом"},
+            {"userPlaceId": 999001, "fls": "1111111111", "flat": 5, "caption": "Дача"},
+            # повтор той же квартиры
+            {"userPlaceId": 3395115, "fls": "1344364128", "flat": "46"},
+            # без userPlaceId — адресовать нельзя
+            {"fls": "2222222222", "flat": "7"},
+            {"userPlaceId": 777, "fls": None, "flat": None},
+            "garbage",
+        ],
+    }
+}
+
+
+class ListPlacesTest(unittest.TestCase):
+    def setUp(self):
+        self.client = MosRuClient()
+        self.session = mock.Mock()
+        self.client._session = self.session
+        self.session.request.return_value = FakeResponse(200, _PLACES_PAYLOAD)
+
+    def test_requests_profile(self):
+        self.client.list_places()
+        method, url = self.session.request.call_args[0]
+        self.assertEqual(method, "GET")
+        self.assertTrue(url.endswith("/profile/user/getInfo/"))
+
+    def test_normalizes_and_deduplicates(self):
+        self.assertEqual(self.client.list_places(), [
+            {"user_place_id": "3395115", "paycode": "1344364128", "flat": "46",
+             "address": "ул. Тестовая, д. 1"},
+            {"user_place_id": "999001", "paycode": "1111111111", "flat": "5",
+             "address": "Дача"},
+            {"user_place_id": "777", "paycode": "", "flat": "", "address": ""},
+        ])
+
+    def test_empty_profile(self):
+        self.session.request.return_value = FakeResponse(200, {"data": {}})
+        self.assertEqual(self.client.list_places(), [])
+
+
 class AuthorizeEdTest(unittest.TestCase):
     """OAuth ed.mos.ru: code из финального URL меняется на сессию."""
 
