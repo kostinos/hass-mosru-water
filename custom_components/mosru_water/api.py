@@ -125,7 +125,8 @@ def _counter_type(counter: dict) -> str:
 
 def counters_of_type(counters: list[dict], type_name: str) -> list[dict]:
     """Счётчики заданного типа; если таких нет — все, чтобы было из чего выбрать."""
-    matched = [c for c in counters if _counter_type(c) == type_name]
+    wanted = type_name.strip().upper()
+    matched = [c for c in counters if _counter_type(c) == wanted]
     return matched or list(counters)
 
 
@@ -711,6 +712,8 @@ class MosRuClient:
                 # flat и fls приходят то строкой, то числом
                 "paycode": str(place.get("fls") or ""),
                 "flat": str(place.get("flat") or ""),
+                # caption — запасной вариант: это может быть собственное название
+                # квартиры у пользователя (например, «Дача»), а не адрес
                 "address": str(place.get("addressCaption") or place.get("caption") or ""),
             })
         return result

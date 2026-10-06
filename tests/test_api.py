@@ -383,6 +383,11 @@ class CountersOfTypeTest(unittest.TestCase):
         other = {"id": "9", "name": "z", "type": ""}
         self.assertEqual(api.counters_of_type([other], api.HOT_TYPE), [other])
 
+    def test_type_argument_is_normalized(self):
+        spaced = {"id": "2", "name": "b", "type": " гвс "}
+        self.assertEqual(api.counters_of_type([_COLD, spaced], api.HOT_TYPE), [spaced])
+        self.assertEqual(api.counters_of_type([_COLD, spaced], " гвс "), [spaced])
+
 
 class PlaceLabelTest(unittest.TestCase):
     def test_full(self):
@@ -397,6 +402,13 @@ class PlaceLabelTest(unittest.TestCase):
             api.place_label({"user_place_id": "1", "paycode": "1344364128",
                              "flat": "46", "address": ""}),
             "кв. 46 — ЕПД 1344364128",
+        )
+
+    def test_paycode_only(self):
+        self.assertEqual(
+            api.place_label({"user_place_id": "1", "paycode": "1344364128",
+                             "flat": "", "address": ""}),
+            "ЕПД 1344364128",
         )
 
     def test_only_id(self):
