@@ -122,3 +122,46 @@ class PlaceStepTest(FlowTestBase):
         await self.flow.async_step_place({})
         self.flow.async_step_discover.assert_awaited_once()
         self.assertEqual(self.flow._data["user_place_id"], "3395115")
+
+
+class DiscoverStepTest(FlowTestBase):
+    def setUp(self):
+        super().setUp()
+        self.flow._data = {"user_place_id": "3395115"}
+
+    async def test_cold_and_hot_are_assigned_automatically(self):
+        self.flow._client.get_counters.return_value = [_HOT, _COLD]
+        await self.flow.async_step_discover()
+        self.flow._client.get_counters.assert_called_once_with("3395115")
+        self.assertEqual(self.flow._data["cold_counter_id"], "1")
+        self.assertEqual(self.flow._data["hot_counter_id"], "2")
+        self.flow.async_show_form.assert_not_called()
+        self.flow.async_step_sensors.assert_awaited_once()
+
+    async def test_ambiguous_meters_are_filtered_and_prefilled(self):
+        cold2 = {"id": "3", "name": "14-000001", "type": "ХВС"}
+        self.flow._client.get_counters.return_value = [_COLD, cold2, _HOT]
+        selector = self.ns["selector"]
+        await self.flow.async_step_discover()
+        self.assertEqual(self.form_kwargs()["step_id"], "discover")
+        cold_opts, hot_opts = [
+            c.kwargs["options"] for c in selector.SelectSelectorConfig.call_args_list[-2:]]
+        self.assertEqual(len(cold_opts), 2)
+        self.assertEqual(len(hot_opts), 1)
+        suggested = self.flow._suggested_counters
+        self.assertEqual(suggested, (None, "2"))
+
+    async def test_user_choice_is_saved(self):
+        self.flow._client.get_counters.return_value = [_COLD, _COLD | {"id": "3"}, _HOT]
+        await self.flow.async_step_discover()
+        await self.flow.async_step_discover(
+            {"cold_counter_id": "3", "hot_counter_id": "2"})
+        self.assertEqual(self.flow._data["cold_counter_id"], "3")
+        self.flow.async_step_sensors.assert_awaited_once()
+
+    async def test_api_error_falls_back_to_manual_ids(self):
+        self.flow._client.get_counters.side_effect = self.ns["MosRuApiError"]()
+        await self.flow.async_step_discover()
+        self.assertEqual(self.form_kwargs()["step_id"], "discover")
+        self.assertIn("Введите ID вручную",
+                      self.form_kwargs()["description_placeholders"]["description"])

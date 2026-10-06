@@ -79,6 +79,7 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._counters: list[dict] = []
         self._counters_fetched: bool = False
         self._places: list[dict] | None = None
+        self._suggested_counters: tuple[str | None, str | None] = (None, None)
         self._client: MosRuClient | None = None
         self._qr_task: asyncio.Task | None = None
         self._qr_url: str = ""
@@ -382,9 +383,10 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_discover(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Выбор счётчиков: автоматически из API или ручной ввод ID."""
+        """Выбор счётчиков: автоматически по типу ХВС/ГВС, из списка или вручную."""
         errors: dict[str, str] = {}
 
+        # Однократно запрашиваем счётчики выбранной квартиры
         if not self._counters_fetched:
             self._counters_fetched = True
             try:
@@ -395,29 +397,43 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return self.async_abort(reason="session_expired")
             except MosRuApiError:
                 self._counters = []  # падаем в ручной ввод
+            self._suggested_counters = pick_counters(self._counters)
+            cold_id, hot_id = self._suggested_counters
+            if cold_id and hot_id:
+                # Обычная квартира: один ХВС и один ГВС — спрашивать нечего.
+                self._data[CONF_COLD_ID] = cold_id
+                self._data[CONF_HOT_ID] = hot_id
+                return await self.async_step_sensors()
 
-        # ── Счётчики найдены автоматически ───────────────────────────────
+        # ── Счётчики найдены, но выбор неоднозначен ──────────────────────
         if self._counters:
-            counter_options = [
-                selector.SelectOptionDict(
-                    value=c["id"],
-                    label=f"{c['name']} ({c['type']}, ID: {c['id']})",
-                )
-                for c in self._counters
-            ]
             if user_input is not None:
                 self._data[CONF_COLD_ID] = user_input[CONF_COLD_ID]
                 self._data[CONF_HOT_ID]  = user_input[CONF_HOT_ID]
                 return await self.async_step_sensors()
 
+            def options(type_name: str) -> list:
+                return [
+                    selector.SelectOptionDict(
+                        value=c["id"],
+                        label=f"{c['name']} ({c['type']}, ID: {c['id']})",
+                    )
+                    for c in counters_of_type(self._counters, type_name)
+                ]
+
+            cold_id, hot_id = self._suggested_counters
             return self.async_show_form(
                 step_id="discover",
                 data_schema=vol.Schema({
-                    vol.Required(CONF_COLD_ID): selector.SelectSelector(
-                        selector.SelectSelectorConfig(options=counter_options)
+                    vol.Required(
+                        CONF_COLD_ID, description={"suggested_value": cold_id}
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(options=options(COLD_TYPE))
                     ),
-                    vol.Required(CONF_HOT_ID): selector.SelectSelector(
-                        selector.SelectSelectorConfig(options=counter_options)
+                    vol.Required(
+                        CONF_HOT_ID, description={"suggested_value": hot_id}
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(options=options(HOT_TYPE))
                     ),
                 }),
                 description_placeholders={
