@@ -18,7 +18,10 @@ from homeassistant.components.persistent_notification import (
     async_dismiss as pn_dismiss,
 )
 
-from .api import MosRuAuthError, MosRuApiError, MosRuClient
+from .api import (
+    MosRuAuthError, MosRuApiError, MosRuClient,
+    COLD_TYPE, HOT_TYPE, counters_of_type, pick_counters, place_label,
+)
 from .const import (
     DOMAIN,
     CONF_PAYCODE, CONF_FLAT, CONF_USER_PLACE_ID,
@@ -313,20 +316,68 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    # ── Шаг 4: выбор счётчиков ───────────────────────────────────────────
+    # ── Шаг 4: выбор квартиры ────────────────────────────────────────────
 
-    def _discover_counters(self) -> list[dict]:
-        """Войти в ed.mos.ru, определить userPlaceId и получить счётчики.
-
-        Синхронный метод для executor. userPlaceId запоминается в конфиге: это
-        идентификатор квартиры в ed.mos.ru, по нему идут все дальнейшие запросы.
-        """
+    def _load_places(self) -> list[dict]:
+        """Войти в ed.mos.ru и получить квартиры профиля (синхронно, в executor)."""
         self._client.authorize_ed()
-        user_place_id = self._client.find_user_place_id(
-            self._data[CONF_PAYCODE], self._data.get(CONF_FLAT, "")
+        return self._client.list_places()
+
+    async def async_step_place(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Выбор квартиры из профиля «Электронного дома»."""
+        if user_input and self._places:
+            chosen = {p["user_place_id"]: p for p in self._places}.get(
+                user_input.get(CONF_USER_PLACE_ID)
+            )
+            if chosen is not None:
+                return await self._async_select_place(chosen)
+
+        if self._places is None:
+            try:
+                self._places = await self.hass.async_add_executor_job(self._load_places)
+            except MosRuAuthError:
+                return self.async_abort(reason="session_expired")
+            except MosRuApiError as err:
+                # Форма без полей: «Отправить» повторяет запрос.
+                _LOGGER.error("Не удалось получить список квартир: %s", err)
+                return self.async_show_form(
+                    step_id="place",
+                    data_schema=vol.Schema({}),
+                    errors={"base": "cannot_get_places"},
+                    description_placeholders={"error": str(err)},
+                )
+
+        if not self._places:
+            return self.async_abort(reason="no_places")
+        if len(self._places) == 1:
+            return await self._async_select_place(self._places[0])
+
+        return self.async_show_form(
+            step_id="place",
+            data_schema=vol.Schema({
+                vol.Required(CONF_USER_PLACE_ID): selector.SelectSelector(
+                    selector.SelectSelectorConfig(options=[
+                        selector.SelectOptionDict(
+                            value=p["user_place_id"], label=place_label(p)
+                        )
+                        for p in self._places
+                    ])
+                ),
+            }),
         )
-        self._data[CONF_USER_PLACE_ID] = user_place_id
-        return self._client.get_counters(user_place_id)
+
+    async def _async_select_place(self, place: dict) -> FlowResult:
+        """Запомнить квартиру: по userPlaceId идут все запросы к ed.mos.ru,
+        paycode и flat нужны имени устройства и повторному поиску после выхода."""
+        self._data[CONF_USER_PLACE_ID] = place["user_place_id"]
+        self._data[CONF_PAYCODE] = place["paycode"]
+        self._data[CONF_FLAT] = place["flat"]
+        return await self.async_step_discover()
+
+
+    # ── Шаг 5: выбор счётчиков ───────────────────────────────────────────
 
     async def async_step_discover(
         self, user_input: dict[str, Any] | None = None
@@ -334,12 +385,11 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Выбор счётчиков: автоматически из API или ручной ввод ID."""
         errors: dict[str, str] = {}
 
-        # Однократно авторизуемся в ed.mos.ru и запрашиваем список счётчиков
         if not self._counters_fetched:
             self._counters_fetched = True
             try:
                 self._counters = await self.hass.async_add_executor_job(
-                    self._discover_counters
+                    self._client.get_counters, self._data[CONF_USER_PLACE_ID]
                 )
             except MosRuAuthError:
                 return self.async_abort(reason="session_expired")
@@ -414,7 +464,7 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    # ── Шаг 5: HA-сенсоры ────────────────────────────────────────────────
+    # ── Шаг 6: HA-сенсоры ────────────────────────────────────────────────
 
     async def async_step_sensors(
         self, user_input: dict[str, Any] | None = None

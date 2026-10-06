@@ -65,3 +65,60 @@ class UserStepTest(FlowTestBase):
         self.flow.async_step_place = AsyncMock(return_value={"type": "place"})
         await self.flow.async_step_totp({"sms_code": "123456"})
         self.flow.async_step_place.assert_awaited_once()
+
+
+class PlaceStepTest(FlowTestBase):
+    def setUp(self):
+        super().setUp()
+        self.flow.async_step_discover = AsyncMock(return_value={"type": "discover"})
+
+    async def test_single_place_is_selected_without_form(self):
+        self.flow._client.list_places.return_value = [_PLACE_A]
+        await self.flow.async_step_place()
+        self.flow._client.authorize_ed.assert_called_once()
+        self.flow.async_show_form.assert_not_called()
+        self.assertEqual(self.flow._data, {
+            "user_place_id": "3395115", "paycode": "1344364128", "flat": "46"})
+        self.flow.async_step_discover.assert_awaited_once()
+
+    async def test_several_places_show_choice(self):
+        self.flow._client.list_places.return_value = [_PLACE_A, _PLACE_B]
+        selector = self.ns["selector"]
+        await self.flow.async_step_place()
+        self.assertEqual(self.form_kwargs()["step_id"], "place")
+        options = selector.SelectSelectorConfig.call_args.kwargs["options"]
+        self.assertEqual(len(options), 2)
+        labels = [c.kwargs["label"] for c in selector.SelectOptionDict.call_args_list]
+        self.assertIn("ул. Тестовая, д. 1, кв. 46 — ЕПД 1344364128", labels)
+        self.flow.async_step_discover.assert_not_awaited()
+
+    async def test_choice_is_saved(self):
+        self.flow._client.list_places.return_value = [_PLACE_A, _PLACE_B]
+        await self.flow.async_step_place()
+        await self.flow.async_step_place({"user_place_id": "999001"})
+        self.assertEqual(self.flow._data, {
+            "user_place_id": "999001", "paycode": "1111111111", "flat": "5"})
+        self.flow.async_step_discover.assert_awaited_once()
+        self.flow._client.list_places.assert_called_once()
+
+    async def test_no_places_aborts(self):
+        self.flow._client.list_places.return_value = []
+        await self.flow.async_step_place()
+        self.flow.async_abort.assert_called_once_with(reason="no_places")
+
+    async def test_rejected_session_aborts(self):
+        self.flow._client.authorize_ed.side_effect = self.ns["MosRuAuthError"]()
+        await self.flow.async_step_place()
+        self.flow.async_abort.assert_called_once_with(reason="session_expired")
+
+    async def test_api_error_shows_reason_and_retries(self):
+        self.flow._client.list_places.side_effect = [
+            self.ns["MosRuApiError"]("ed.mos.ru auth: HTTP 451"), [_PLACE_A]]
+        await self.flow.async_step_place()
+        kwargs = self.form_kwargs()
+        self.assertEqual(kwargs["errors"], {"base": "cannot_get_places"})
+        self.assertEqual(kwargs["description_placeholders"],
+                         {"error": "ed.mos.ru auth: HTTP 451"})
+        await self.flow.async_step_place({})
+        self.flow.async_step_discover.assert_awaited_once()
+        self.assertEqual(self.flow._data["user_place_id"], "3395115")
