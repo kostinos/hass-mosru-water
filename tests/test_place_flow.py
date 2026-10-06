@@ -187,3 +187,14 @@ class DiscoverStepTest(FlowTestBase):
         self.assertEqual(self.form_kwargs()["step_id"], "discover")
         self.assertIn("Введите ID вручную",
                       self.form_kwargs()["description_placeholders"]["description"])
+
+
+class TranslationsTest(unittest.TestCase):
+    def test_place_step_and_reasons(self):
+        for name in ("strings.json", "translations/ru.json", "translations/en.json"):
+            with self.subTest(translation=name):
+                config = json.loads((SOURCE.parent / name).read_text())["config"]
+                self.assertNotIn("user", config["step"])
+                self.assertIn("user_place_id", config["step"]["place"]["data"])
+                self.assertIn("{error}", config["error"]["cannot_get_places"])
+                self.assertIn("no_places", config["abort"])
