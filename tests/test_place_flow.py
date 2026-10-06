@@ -20,7 +20,6 @@ _HOT = {"id": "2", "name": "14-087265", "type": "ГВС"}
 class FlowTestBase(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         cls, self.ns = load_flow_methods()
-        self.ns["MosRuClient"].reset_mock()
         self.flow = cls()
 
         async def executor(fn, *args):
@@ -101,6 +100,15 @@ class PlaceStepTest(FlowTestBase):
         self.flow.async_step_discover.assert_awaited_once()
         self.flow._client.list_places.assert_called_once()
 
+    async def test_unknown_place_choice_reshows_form(self):
+        self.flow._client.list_places.return_value = [_PLACE_A, _PLACE_B]
+        await self.flow.async_step_place()
+        await self.flow.async_step_place({"user_place_id": "nope"})
+        self.assertEqual(self.form_kwargs()["step_id"], "place")
+        self.assertEqual(self.flow.async_show_form.call_count, 2)
+        self.flow.async_step_discover.assert_not_awaited()
+        self.flow._client.list_places.assert_called_once()
+
     async def test_no_places_aborts(self):
         self.flow._client.list_places.return_value = []
         await self.flow.async_step_place()
@@ -144,12 +152,26 @@ class DiscoverStepTest(FlowTestBase):
         selector = self.ns["selector"]
         await self.flow.async_step_discover()
         self.assertEqual(self.form_kwargs()["step_id"], "discover")
-        cold_opts, hot_opts = [
-            c.kwargs["options"] for c in selector.SelectSelectorConfig.call_args_list[-2:]]
-        self.assertEqual(len(cold_opts), 2)
-        self.assertEqual(len(hot_opts), 1)
-        suggested = self.flow._suggested_counters
-        self.assertEqual(suggested, (None, "2"))
+        offered = {c.kwargs["value"] for c in selector.SelectOptionDict.call_args_list}
+        self.assertEqual(offered, {"1", "2", "3"})
+        sizes = sorted(len(c.kwargs["options"])
+                       for c in selector.SelectSelectorConfig.call_args_list)
+        self.assertEqual(sizes, [1, 2])  # ГВС: один, ХВС: два
+        self.assertEqual(self.flow._suggested_counters, (None, "2"))
+        required = dict(self.ns["_vol_required"])
+        self.assertEqual(required["hot_counter_id"],
+                         {"description": {"suggested_value": "2"}})
+        self.assertEqual(required["cold_counter_id"], {})
+
+    async def test_retry_discovery_recovers_automatic_assignment(self):
+        self.flow._client.get_counters.side_effect = self.ns["MosRuApiError"]()
+        await self.flow.async_step_discover()
+        self.flow._client.get_counters.side_effect = None
+        self.flow._client.get_counters.return_value = [_COLD, _HOT]
+        await self.flow.async_step_discover({"retry_discovery": True})
+        self.assertEqual(self.flow._data["cold_counter_id"], "1")
+        self.assertEqual(self.flow._data["hot_counter_id"], "2")
+        self.flow.async_step_sensors.assert_awaited_once()
 
     async def test_user_choice_is_saved(self):
         self.flow._client.get_counters.return_value = [_COLD, _COLD | {"id": "3"}, _HOT]

@@ -377,7 +377,6 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._data[CONF_FLAT] = place["flat"]
         return await self.async_step_discover()
 
-
     # ── Шаг 5: выбор счётчиков ───────────────────────────────────────────
 
     async def async_step_discover(
@@ -421,18 +420,21 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     for c in counters_of_type(self._counters, type_name)
                 ]
 
+            def required(key: str, suggested: str | None):
+                # Пустой suggested_value (None) старые фронтенды HA подставляют
+                # в поле как значение, поэтому передаём его только когда он есть.
+                if suggested:
+                    return vol.Required(key, description={"suggested_value": suggested})
+                return vol.Required(key)
+
             cold_id, hot_id = self._suggested_counters
             return self.async_show_form(
                 step_id="discover",
                 data_schema=vol.Schema({
-                    vol.Required(
-                        CONF_COLD_ID, description={"suggested_value": cold_id}
-                    ): selector.SelectSelector(
+                    required(CONF_COLD_ID, cold_id): selector.SelectSelector(
                         selector.SelectSelectorConfig(options=options(COLD_TYPE))
                     ),
-                    vol.Required(
-                        CONF_HOT_ID, description={"suggested_value": hot_id}
-                    ): selector.SelectSelector(
+                    required(CONF_HOT_ID, hot_id): selector.SelectSelector(
                         selector.SelectSelectorConfig(options=options(HOT_TYPE))
                     ),
                 }),

@@ -33,10 +33,17 @@ def load_flow_methods():
                 and n.name in names]
     module = ast.Module(body=[ast.ImportFrom(module="__future__", names=[
         ast.alias(name="annotations")], level=0), cls], type_ignores=[])
+    required_calls = []
+
+    def required(key, **kw):
+        required_calls.append((key, kw))
+        return key
+
     namespace = {
+        "_vol_required": required_calls,
         "_AUTH_SETTINGS_URL": "/config/integrations/integration/mosru_water",
         "vol": SimpleNamespace(Schema=lambda value: value,
-                               Required=lambda key, **kw: key,
+                               Required=required,
                                Optional=lambda key, **kw: key),
         "CONF_PAYCODE": "paycode", "CONF_FLAT": "flat",
         "CONF_USER_PLACE_ID": "user_place_id",
