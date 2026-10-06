@@ -360,5 +360,107 @@ class SessionNetworkTest(unittest.TestCase):
         with self.assertRaises(MosRuTemporaryError): self.client.authorize_ed()
 
 
+_TOTP_URL = "https://login.mos.ru/sps/login/methods2/totp?bo=%2Fsps%2Foauth%2Fae"
+_TRUST_URL = "https://login.mos.ru/sps/login/ur/askToTrust?bo=%2Fsps%2Foauth%2Fae"
+_SATISFY_URL = "https://www.mos.ru/api/acs/v1/login/satisfy?code=test"
+
+
+def _page(status: int, url: str, *, location: str | None = None, text: str = ""):
+    """Ответ login.mos.ru: для редиректов — Location, для страниц — HTML."""
+    return mock.Mock(
+        status_code=status, url=url, text=text, history=[],
+        headers={"Location": location} if location else {},
+    )
+
+
+class QrSecondFactorTest(unittest.TestCase):
+    """После сканирования QR mos.ru может запросить второй фактор.
+
+    Цепочка из реального входа аккаунта с приложением-аутентификатором:
+    POST qrCode/complete → 303 → /sps/login/methods2/totp. Пока код не введён,
+    SSO-сессии нет, и вход в ed.mos.ru уходит на форму пароля.
+    """
+
+    def setUp(self):
+        self.client = MosRuClient()
+        self.session = mock.Mock()
+        self.session.cookies = []
+        self.client._session = self.session
+
+    def test_totp_page_requires_code(self):
+        self.session.post.return_value = _page(200, _TOTP_URL)
+        self.assertEqual(self.client.complete_qr_auth(), "totp_required")
+
+    def test_leaving_login_host_is_done(self):
+        self.session.post.return_value = _page(200, "https://www.mos.ru/")
+        self.assertEqual(self.client.complete_qr_auth(), "done")
+
+    def test_unknown_login_step_is_not_reported_as_done(self):
+        # Раньше любой неизвестный шаг считался успехом, а ошибка всплывала
+        # позже как «сессия истекла».
+        self.session.post.return_value = _page(
+            200, "https://login.mos.ru/sps/login/methods/password?bo=%2Fsps")
+        with self.assertRaises(MosRuAuthError) as ctx:
+            self.client.complete_qr_auth()
+        self.assertIn("/sps/login/methods/password", str(ctx.exception))
+
+    def _start_totp(self):
+        self.session.post.return_value = _page(200, _TOTP_URL)
+        self.client.complete_qr_auth()
+        self.session.reset_mock()
+
+    def test_totp_code_is_posted_to_totp_page(self):
+        self._start_totp()
+        self.session.post.return_value = _page(303, _TOTP_URL, location=_SATISFY_URL)
+        self.session.get.side_effect = [
+            _page(302, _SATISFY_URL, location="https://www.mos.ru/"),
+            _page(200, "https://www.mos.ru/"),
+        ]
+
+        self.client.submit_totp("123456")
+
+        args, kwargs = self.session.post.call_args
+        self.assertEqual(args[0], _TOTP_URL)
+        self.assertEqual(kwargs["data"], {"otp": "123456"})
+        self.assertFalse(kwargs["allow_redirects"])
+        # satisfy требует навигационных заголовков, как у браузера.
+        first_hop = self.session.get.call_args_list[0]
+        self.assertEqual(first_hop.args[0], _SATISFY_URL)
+        self.assertEqual(first_hop.kwargs["headers"]["Sec-Fetch-Mode"], "navigate")
+
+    def test_wrong_totp_code_stays_on_totp_page(self):
+        self._start_totp()
+        self.session.post.return_value = _page(200, _TOTP_URL)
+        with self.assertRaises(MosRuAuthError):
+            self.client.submit_totp("000000")
+
+    def test_totp_then_trust_device(self):
+        self._start_totp()
+        trust_form = (
+            '<form action="/sps/login/ur/askToTrust?bo=%2Fsps" method="post">'
+            '<input type="hidden" name="csrf" value="tok"></form>'
+        )
+        self.session.post.side_effect = [
+            _page(303, _TOTP_URL, location=_TRUST_URL),
+            _page(302, _TRUST_URL, location="https://www.mos.ru/"),
+        ]
+        self.session.get.side_effect = [
+            _page(200, _TRUST_URL, text=trust_form),
+            _page(200, "https://www.mos.ru/"),
+        ]
+        self.session.cookies = [mock.Mock(name="cookie")]
+        self.session.cookies[0].name = "Ltpatoken2"
+
+        self.client.submit_totp("123456")
+
+        trust_call = self.session.post.call_args_list[1]
+        self.assertEqual(trust_call.kwargs["data"], {"csrf": "tok", "action": "trust"})
+
+    def test_totp_without_pending_login_fails(self):
+        with self.assertRaises(MosRuAuthError):
+            self.client.submit_totp("123456")
+        self.session.post.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

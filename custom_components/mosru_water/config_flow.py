@@ -146,6 +146,22 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         self._qr_task = None
 
+        if result == "login_incomplete":
+            return self.async_abort(reason="login_incomplete")
+
+        if result == "totp_required":
+            pn_create(
+                self.hass,
+                message=(
+                    "Вход подтверждён, mos.ru просит код из приложения-аутентификатора. "
+                    "Введите его в Home Assistant.\n\n"
+                    f"[Продолжить авторизацию]({_AUTH_SETTINGS_URL})"
+                ),
+                title="MOS.RU Water: Подтверждение входа",
+                notification_id="mosru_water_qr",
+            )
+            return self.async_show_progress_done(next_step_id="totp")
+
         if result == "code_required":
             pn_create(
                 self.hass,
@@ -210,10 +226,16 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     status = await self.hass.async_add_executor_job(
                         self._client.complete_qr_auth
                     )
-                except (MosRuAuthError, MosRuApiError):
+                except MosRuAuthError as err:
+                    # Новый QR тут не поможет: mos.ru ждёт шаг, который мы не умеем.
+                    _LOGGER.error("QR-вход не завершён: %s", err)
+                    return "login_incomplete"
+                except MosRuApiError:
                     return False
                 if status == "sms_required":
                     return "code_required"
+                if status == "totp_required":
+                    return "totp_required"
                 return True
 
             if command == "askForConfirm":
@@ -247,14 +269,27 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Ввод 6-значного кода из пуш-уведомления (2FA)."""
+        return await self._async_submit_code(
+            "code", self._client.submit_sms_and_trust, user_input
+        )
+
+    async def async_step_totp(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Ввод кода из приложения-аутентификатора (2FA)."""
+        return await self._async_submit_code(
+            "totp", self._client.submit_totp, user_input
+        )
+
+    async def _async_submit_code(
+        self, step_id: str, submit, user_input: dict[str, Any] | None
+    ) -> FlowResult:
         errors: dict[str, str] = {}
 
         if user_input is not None:
             code = user_input.get("sms_code", "").strip()
             try:
-                await self.hass.async_add_executor_job(
-                    self._client.submit_sms_and_trust, code
-                )
+                await self.hass.async_add_executor_job(submit, code)
             except MosRuAuthError:
                 errors["sms_code"] = "invalid_code"
             except MosRuApiError:
@@ -276,7 +311,7 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self.async_step_discover()
 
         return self.async_show_form(
-            step_id="code",
+            step_id=step_id,
             data_schema=vol.Schema({
                 vol.Required("sms_code"): selector.TextSelector(
                     selector.TextSelectorConfig(

@@ -17,7 +17,14 @@
         "title": "Login confirmation (2FA)",
         "description": "Open the **mos.ru** or **Gosuslugi Moscow** app and tap **\"Confirm login\"**.\n\nAfter tapping, you will receive a push notification with a 6-digit code — enter it below.",
         "data": {
-          "sms_code": "6-digit code from the push notification"
+          "sms_code": "Confirmation code"
+        }
+      },
+      "totp": {
+        "title": "Authenticator app code",
+        "description": "QR login was confirmed, but your mos.ru account is protected with an authenticator app.\n\nOpen your authenticator app and enter the current 6-digit mos.ru code.",
+        "data": {
+          "sms_code": "Confirmation code"
         }
       },
       "discover": {
@@ -53,6 +60,7 @@
       "cannot_connect": "Failed to connect to mos.ru",
       "cannot_get_counters": "Failed to retrieve meter list",
       "session_expired": "mos.ru session has expired, re-authorization is required",
+      "login_incomplete": "mos.ru login was not completed: the portal requested a step this integration does not support. See the Home Assistant log for details.",
       "reauth_successful": "Authorization updated successfully"
     }
   },
