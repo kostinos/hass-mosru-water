@@ -75,33 +75,24 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._data: dict[str, Any] = {}
         self._counters: list[dict] = []
         self._counters_fetched: bool = False
+        self._places: list[dict] | None = None
         self._client: MosRuClient | None = None
         self._qr_task: asyncio.Task | None = None
         self._qr_url: str = ""
         self._qr_link: str = ""
         self._reauth_entry: config_entries.ConfigEntry | None = None
 
-    # ── Шаг 1: код плательщика и квартира ────────────────────────────────
+    # ── Шаг 1: старт — сразу вход, реквизиты не спрашиваем ───────────────
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Ввод кода плательщика и номера квартиры."""
+        """Начать настройку: квартира выбирается из профиля после входа."""
         if self._async_current_entries():
             return self.async_abort(reason="already_configured")
 
-        if user_input is not None:
-            self._data.update(user_input)
-            self._client = MosRuClient()
-            return await self.async_step_qr()
-
-        return self.async_show_form(
-            step_id="user",
-            data_schema=vol.Schema({
-                vol.Required(CONF_PAYCODE): str,
-                vol.Required(CONF_FLAT):    str,
-            }),
-        )
+        self._client = MosRuClient()
+        return await self.async_step_qr()
 
     # ── Шаг 2: QR-авторизация ────────────────────────────────────────────
 
@@ -194,7 +185,7 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 data_updates={CONF_SESSION_COOKIES: cookies},
             )
 
-        return self.async_show_progress_done(next_step_id="discover")
+        return self.async_show_progress_done(next_step_id="place")
 
     def _notify_qr_auth(self) -> None:
         """Показать актуальную ссылку подтверждения той же сессии, что в QR."""
@@ -308,7 +299,7 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         data_updates={CONF_SESSION_COOKIES: cookies},
                     )
 
-                return await self.async_step_discover()
+                return await self.async_step_place()
 
         return self.async_show_form(
             step_id=step_id,

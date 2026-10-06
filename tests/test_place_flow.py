@@ -1,0 +1,67 @@
+"""Мастер: квартира из профиля «Электронного дома», счётчики по типу ХВС/ГВС."""
+from __future__ import annotations
+
+import asyncio
+import json
+from types import SimpleNamespace
+import unittest
+from unittest.mock import AsyncMock, Mock
+
+from test_reauth import SOURCE, load_flow_methods
+
+_PLACE_A = {"user_place_id": "3395115", "paycode": "1344364128", "flat": "46",
+            "address": "ул. Тестовая, д. 1"}
+_PLACE_B = {"user_place_id": "999001", "paycode": "1111111111", "flat": "5",
+            "address": "Дача"}
+_COLD = {"id": "1", "name": "14-007378", "type": "ХВС"}
+_HOT = {"id": "2", "name": "14-087265", "type": "ГВС"}
+
+
+class FlowTestBase(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        cls, self.ns = load_flow_methods()
+        self.ns["MosRuClient"].reset_mock()
+        self.flow = cls()
+
+        async def executor(fn, *args):
+            return fn(*args)
+
+        self.flow.hass = SimpleNamespace(
+            async_add_executor_job=executor,
+            config=SimpleNamespace(path=Mock(return_value="/tmp/www")),
+        )
+        self.flow._client = Mock()
+        self.flow.async_show_form = Mock(return_value={"type": "form"})
+        self.flow.async_abort = Mock(return_value={"type": "abort"})
+        self.flow.async_step_sensors = AsyncMock(return_value={"type": "sensors"})
+
+    def form_kwargs(self):
+        return self.flow.async_show_form.call_args.kwargs
+
+
+class UserStepTest(FlowTestBase):
+    async def test_goes_straight_to_qr(self):
+        self.flow._async_current_entries = Mock(return_value=[])
+        self.flow.async_step_qr = AsyncMock(return_value={"type": "progress"})
+        await self.flow.async_step_user()
+        self.ns["MosRuClient"].assert_called_once()
+        self.flow.async_step_qr.assert_awaited_once()
+        self.flow.async_show_form.assert_not_called()
+
+    async def test_single_entry_only(self):
+        self.flow._async_current_entries = Mock(return_value=["entry"])
+        await self.flow.async_step_user()
+        self.flow.async_abort.assert_called_once_with(reason="already_configured")
+
+    async def test_qr_success_leads_to_place(self):
+        self.flow._client.get_session_cookies.return_value = {"c": "v"}
+        self.flow._qr_task = asyncio.get_running_loop().create_future()
+        self.flow._qr_task.set_result(True)
+        self.flow.async_show_progress_done = Mock()
+        await self.flow.async_step_qr()
+        self.flow.async_show_progress_done.assert_called_once_with(next_step_id="place")
+
+    async def test_code_success_leads_to_place(self):
+        self.flow.async_step_place = AsyncMock(return_value={"type": "place"})
+        await self.flow.async_step_totp({"sms_code": "123456"})
+        self.flow.async_step_place.assert_awaited_once()
