@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import importlib.util
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,11 @@ from unittest.mock import AsyncMock, Mock
 
 SOURCE = Path(__file__).resolve().parents[1] / "custom_components/mosru_water/config_flow.py"
 
+_API_PATH = SOURCE.parent / "api.py"
+_spec = importlib.util.spec_from_file_location("mosru_water_api_for_flow", _API_PATH)
+api = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(api)
+
 
 def load_flow_methods():
     # Keep the actual method bodies, replacing only the unavailable HA base class
@@ -18,7 +24,9 @@ def load_flow_methods():
     tree = ast.parse(SOURCE.read_text())
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef))
     names = {"__init__", "async_step_reauth", "_notify_qr_auth", "_poll_qr_scan",
-             "async_step_qr", "async_step_code", "async_step_totp", "_async_submit_code"}
+             "async_step_qr", "async_step_code", "async_step_totp", "_async_submit_code",
+             "async_step_user", "async_step_place", "_load_places", "_async_select_place",
+             "async_step_discover"}
     cls.bases = []
     cls.keywords = []
     cls.body = [n for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -27,7 +35,16 @@ def load_flow_methods():
         ast.alias(name="annotations")], level=0), cls], type_ignores=[])
     namespace = {
         "_AUTH_SETTINGS_URL": "/config/integrations/integration/mosru_water",
-        "vol": SimpleNamespace(Schema=lambda value: value, Required=lambda key: key),
+        "vol": SimpleNamespace(Schema=lambda value: value,
+                               Required=lambda key, **kw: key,
+                               Optional=lambda key, **kw: key),
+        "CONF_PAYCODE": "paycode", "CONF_FLAT": "flat",
+        "CONF_USER_PLACE_ID": "user_place_id",
+        "CONF_COLD_ID": "cold_counter_id", "CONF_HOT_ID": "hot_counter_id",
+        "pick_counters": api.pick_counters,
+        "counters_of_type": api.counters_of_type,
+        "place_label": api.place_label,
+        "COLD_TYPE": api.COLD_TYPE, "HOT_TYPE": api.HOT_TYPE,
         "selector": Mock(),
         "_LOGGER": Mock(),
         "MosRuClient": Mock(),
