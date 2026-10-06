@@ -114,6 +114,43 @@ def _parse_form(html: str) -> tuple[str, dict]:
     return action, hidden
 
 
+# Тип счётчика в ответе ed.mos.ru (поле typeName).
+COLD_TYPE = "ХВС"
+HOT_TYPE  = "ГВС"
+
+
+def _counter_type(counter: dict) -> str:
+    return str(counter.get("type") or "").strip().upper()
+
+
+def counters_of_type(counters: list[dict], type_name: str) -> list[dict]:
+    """Счётчики заданного типа; если таких нет — все, чтобы было из чего выбрать."""
+    matched = [c for c in counters if _counter_type(c) == type_name]
+    return matched or list(counters)
+
+
+def pick_counters(counters: list[dict]) -> tuple[str | None, str | None]:
+    """(cold_id, hot_id): единственный счётчик ХВС и единственный ГВС, иначе None."""
+    def single(type_name: str) -> str | None:
+        ids = [c["id"] for c in counters if _counter_type(c) == type_name]
+        return ids[0] if len(ids) == 1 else None
+
+    return single(COLD_TYPE), single(HOT_TYPE)
+
+
+def place_label(place: dict) -> str:
+    """Подпись квартиры в списке: «адрес, кв. N — ЕПД код»."""
+    label = ", ".join(
+        part for part in (
+            place.get("address") or "",
+            f"кв. {place['flat']}" if place.get("flat") else "",
+        ) if part
+    )
+    if place.get("paycode"):
+        label = f"{label} — ЕПД {place['paycode']}" if label else f"ЕПД {place['paycode']}"
+    return label or place["user_place_id"]
+
+
 def _unfinished_login_step(url: str) -> str | None:
     """Путь шага входа, если цепочка остановилась на login.mos.ru, иначе None.
 

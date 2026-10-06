@@ -345,6 +345,67 @@ class ListPlacesTest(unittest.TestCase):
         self.assertEqual(self.client.list_places(), [])
 
 
+_COLD = {"id": "1", "name": "14-007378", "type": "ХВС"}
+_HOT = {"id": "2", "name": "14-087265", "type": "ГВС"}
+
+
+class PickCountersTest(unittest.TestCase):
+    def test_one_cold_one_hot(self):
+        self.assertEqual(api.pick_counters([_HOT, _COLD]), ("1", "2"))
+
+    def test_two_cold_meters_are_ambiguous(self):
+        cold2 = {"id": "3", "name": "x", "type": "ХВС"}
+        self.assertEqual(api.pick_counters([_COLD, cold2, _HOT]), (None, "2"))
+
+    def test_unknown_types(self):
+        self.assertEqual(
+            api.pick_counters([{"id": "5", "name": "x", "type": ""},
+                               {"id": "6", "name": "y", "type": "ЭЛ"}]),
+            (None, None),
+        )
+
+    def test_empty(self):
+        self.assertEqual(api.pick_counters([]), (None, None))
+
+    def test_type_case_and_spaces(self):
+        self.assertEqual(
+            api.pick_counters([{"id": "1", "name": "a", "type": " хвс "},
+                               {"id": "2", "name": "b", "type": "гвс"}]),
+            ("1", "2"),
+        )
+
+
+class CountersOfTypeTest(unittest.TestCase):
+    def test_filters_by_type(self):
+        self.assertEqual(api.counters_of_type([_COLD, _HOT], api.COLD_TYPE), [_COLD])
+
+    def test_falls_back_to_all_when_type_missing(self):
+        other = {"id": "9", "name": "z", "type": ""}
+        self.assertEqual(api.counters_of_type([other], api.HOT_TYPE), [other])
+
+
+class PlaceLabelTest(unittest.TestCase):
+    def test_full(self):
+        self.assertEqual(
+            api.place_label({"user_place_id": "1", "paycode": "1344364128",
+                             "flat": "46", "address": "ул. Тестовая, д. 1"}),
+            "ул. Тестовая, д. 1, кв. 46 — ЕПД 1344364128",
+        )
+
+    def test_without_address(self):
+        self.assertEqual(
+            api.place_label({"user_place_id": "1", "paycode": "1344364128",
+                             "flat": "46", "address": ""}),
+            "кв. 46 — ЕПД 1344364128",
+        )
+
+    def test_only_id(self):
+        self.assertEqual(
+            api.place_label({"user_place_id": "777", "paycode": "", "flat": "", "address": ""}),
+            "777",
+        )
+
+
 class AuthorizeEdTest(unittest.TestCase):
     """OAuth ed.mos.ru: code из финального URL меняется на сессию."""
 
