@@ -65,6 +65,11 @@ class UserStepTest(FlowTestBase):
         await self.flow.async_step_totp({"sms_code": "123456"})
         self.flow.async_step_place.assert_awaited_once()
 
+    async def test_sms_code_success_leads_to_place(self):
+        self.flow.async_step_place = AsyncMock(return_value={"type": "place"})
+        await self.flow.async_step_code({"sms_code": "123456"})
+        self.flow.async_step_place.assert_awaited_once()
+
 
 class PlaceStepTest(FlowTestBase):
     def setUp(self):
