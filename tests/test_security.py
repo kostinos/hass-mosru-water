@@ -275,7 +275,8 @@ class ServiceAuthorizationTests(unittest.IsolatedAsyncioTestCase):
         method = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef)
                       and node.name == 'async_unload_entry')
         module = ast.Module(body=[ast.ImportFrom(module='__future__', names=[ast.alias(name='annotations')], level=0), method], type_ignores=[])
-        ns = dict(DOMAIN='mosru_water', PLATFORMS=['sensor', 'button'])
+        ns = dict(DOMAIN='mosru_water', PLATFORMS=['sensor', 'button'],
+                  SERVICE_REPLACE_READINGS='replace_readings')
         exec(compile(ast.fix_missing_locations(module), 'unload_entry', 'exec'), ns)
         lock = threading.Lock()
         coordinator = SimpleNamespace(_io_lock=lock, _manual_pending=False)
