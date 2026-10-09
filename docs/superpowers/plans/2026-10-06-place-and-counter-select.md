@@ -194,8 +194,8 @@ git commit -m "Add list_places() for picking a flat from the ed.mos.ru profile"
 В `tests/test_api.py` после `ListPlacesTest` добавить:
 
 ```python
-_COLD = {"id": "1", "name": "14-007378", "type": "ХВС"}
-_HOT = {"id": "2", "name": "14-087265", "type": "ГВС"}
+_COLD = {"id": "1", "name": "TEST-COLD-001", "type": "ХВС"}
+_HOT = {"id": "2", "name": "TEST-HOT-001", "type": "ГВС"}
 
 
 class PickCountersTest(unittest.TestCase):
@@ -407,8 +407,8 @@ _PLACE_A = {"user_place_id": "3395115", "paycode": "1344364128", "flat": "46",
             "address": "ул. Тестовая, д. 1"}
 _PLACE_B = {"user_place_id": "999001", "paycode": "1111111111", "flat": "5",
             "address": "Дача"}
-_COLD = {"id": "1", "name": "14-007378", "type": "ХВС"}
-_HOT = {"id": "2", "name": "14-087265", "type": "ГВС"}
+_COLD = {"id": "1", "name": "TEST-COLD-001", "type": "ХВС"}
+_HOT = {"id": "2", "name": "TEST-HOT-001", "type": "ГВС"}
 
 
 class FlowTestBase(unittest.IsolatedAsyncioTestCase):

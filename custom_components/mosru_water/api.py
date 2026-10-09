@@ -270,7 +270,7 @@ def _parse_api_response(resp: requests.Response) -> dict:
     # ed.mos.ru сообщает об ошибке в поле "error" строкой, а не флагом.
     err_text = data.get("error") if isinstance(data.get("error"), str) else None
     if err_text and "уже внесено" in err_text:
-        raise MosRuAlreadySubmittedError(err_text)
+        raise MosRuAlreadySubmittedError('Показание за период уже внесено')
     # Прочие HTTP-ошибки (404 на неверный эндпоинт, 400 на плохой payload и т.п.).
     # Проверяем после разбора JSON, чтобы включить в сообщение текст от сервера.
     if not resp.ok:
@@ -732,7 +732,7 @@ class MosRuClient:
         )
         places = data.get("data")
         if not isinstance(places, list):
-            raise MosRuApiError(f"Неожиданный ответ: {repr(data)[:200]}")
+            raise MosRuApiError('Неожиданный ответ сервиса')
         return places
 
     def list_places(self) -> list[dict]:

@@ -88,6 +88,7 @@ class ReauthTest(unittest.IsolatedAsyncioTestCase):
         self.flow.async_show_progress = Mock(return_value={"type": "progress"})
         self.flow.async_update_reload_and_abort = Mock(return_value={"type": "abort"})
         self.flow.async_abort = Mock()
+        self.flow._abort_if_in_progress = Mock()
 
     async def test_reauth_starts_session_for_notification_link(self):
         self.flow.async_step_qr = AsyncMock()

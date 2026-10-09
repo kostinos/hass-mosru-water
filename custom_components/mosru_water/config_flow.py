@@ -143,6 +143,7 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> FlowResult:
         """Показать QR-код и ждать сканирования."""
         if self._qr_task is None:
+            self._abort_if_in_progress()
             try:
                 qr_data = await self.hass.async_add_executor_job(
                     self._client.start_qr_session

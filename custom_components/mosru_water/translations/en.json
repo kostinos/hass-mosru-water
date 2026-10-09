@@ -62,7 +62,8 @@
       "session_expired": "mos.ru session has expired, re-authorization is required",
       "login_incomplete": "mos.ru login was not completed: the portal requested a step this integration does not support. See the Home Assistant log for details.",
       "reauth_successful": "Authorization updated successfully",
-      "no_places": "Your Electronic House profile has no apartments. Add one at ed.mos.ru and start the setup again."
+      "no_places": "Your Electronic House profile has no apartments. Add one at ed.mos.ru and start the setup again.",
+      "already_in_progress": "A mos.ru login is already in progress. Finish or cancel the other flow."
     }
   },
   "options": {
