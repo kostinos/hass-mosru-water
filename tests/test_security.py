@@ -139,6 +139,31 @@ class ReadingSafetyTests(unittest.TestCase):
         self.assertNotIn('last_hot', result)
         self.client.remove_last_indication.assert_not_called()
 
+    def test_first_put_rejection_does_not_block_month(self):
+        self.client.send_reading.side_effect = api.MosRuApiError('rejected')
+        with self.assertRaises(namespace['UpdateFailed']):
+            self.coordinator._submit()
+        self.assertIsNone(self.coordinator._submitted_month)
+
+    def test_first_put_auth_failure_requests_reauth_without_block(self):
+        self.client.send_reading.side_effect = api.MosRuAuthError('expired')
+        with self.assertRaises(namespace['ConfigEntryAuthFailed']):
+            self.coordinator._submit()
+        self.assertIsNone(self.coordinator._submitted_month)
+
+    def test_rejected_put_after_delete_is_still_partial(self):
+        self.client.send_reading.side_effect = api.MosRuApiError('rejected')
+        result = self.coordinator._submit(replace=True)
+        self.assertEqual(result['last_status'], 'partial')
+        self.assertEqual(result['operation_results']['холодная']['stage'], 'send_rejected_after_delete')
+
+    def test_auth_failure_after_first_write_preserves_guard_for_reauth(self):
+        self.client.send_reading.side_effect = [{}, api.MosRuAuthError('expired')]
+        with self.assertRaises(namespace['ConfigEntryAuthFailed']) as caught:
+            self.coordinator._submit()
+        self.assertEqual(caught.exception.operation_result['last_status'], 'partial')
+        self.assertEqual(caught.exception.operation_result['last_cold'], 106)
+
     def test_already_submitted_is_not_a_new_sent_reading(self):
         self.client.send_reading.side_effect = api.MosRuAlreadySubmittedError()
         result = self.coordinator._submit()

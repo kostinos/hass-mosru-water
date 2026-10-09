@@ -203,3 +203,18 @@ class TranslationsTest(unittest.TestCase):
                 self.assertIn("user_place_id", config["step"]["place"]["data"])
                 self.assertIn("{error}", config["error"]["cannot_get_places"])
                 self.assertIn("no_places", config["abort"])
+
+class DuplicateMeterTest(FlowTestBase):
+    async def test_dropdown_duplicate_keeps_wizard_on_discover(self):
+        self.flow._counters_fetched = True
+        self.flow._counters = [{'id': 'same', 'name': 'test', 'type': ''}]
+        self.flow._suggested_counters = (None, None)
+        await self.flow.async_step_discover({'cold_counter_id': 'same', 'hot_counter_id': 'same'})
+        self.flow.async_step_sensors.assert_not_awaited()
+        self.assertEqual(self.form_kwargs()['errors']['base'], 'duplicate_counters')
+
+    async def test_manual_duplicate_keeps_wizard_on_discover(self):
+        self.flow._counters_fetched = True
+        await self.flow.async_step_discover({'cold_counter_id': 'same', 'hot_counter_id': 'same'})
+        self.flow.async_step_sensors.assert_not_awaited()
+        self.assertEqual(self.form_kwargs()['errors']['base'], 'duplicate_counters')

@@ -88,7 +88,13 @@ class ReauthTest(unittest.IsolatedAsyncioTestCase):
         self.flow.async_show_progress = Mock(return_value={"type": "progress"})
         self.flow.async_update_reload_and_abort = Mock(return_value={"type": "abort"})
         self.flow.async_abort = Mock()
-        self.flow._abort_if_in_progress = Mock()
+        self.flow._async_in_progress = Mock(return_value=[])
+
+    async def test_parallel_qr_flow_aborts_using_real_ha_helper_name(self):
+        self.flow._async_in_progress.return_value = [{'flow_id': 'other'}]
+        await self.flow.async_step_qr()
+        self.flow.async_abort.assert_called_once_with(reason='already_in_progress')
+        self.ns['MosRuClient'].assert_not_called()
 
     async def test_reauth_starts_session_for_notification_link(self):
         self.flow.async_step_qr = AsyncMock()

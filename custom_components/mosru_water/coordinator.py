@@ -246,6 +246,10 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._persist_user_place_id()
             self._persist_operation_guard(result)
             return result
+        except ConfigEntryAuthFailed as err:
+            if getattr(err, "operation_result", None):
+                self._persist_operation_guard(err.operation_result)
+            raise
         finally:
             self._manual_pending = False
 
@@ -329,7 +333,12 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         or latest.get('current_reading') != expected.get('current_reading')):
                     raise MosRuApiError('Показание на портале изменилось; удаление отменено')
                 outcomes[label] = {'stage': 'delete_unknown', 'value': value}
-                client.remove_last_indication(user_place_id, counter_id)
+                try:
+                    client.remove_last_indication(user_place_id, counter_id)
+                except (MosRuAuthError, MosRuApiError) as err:
+                    if not isinstance(err, MosRuTemporaryError):
+                        outcomes[label]["stage"] = "delete_rejected"
+                    raise
                 outcomes[label]['stage'] = 'send_unknown_after_delete'
             else:
                 outcomes[label] = {'stage': 'send_unknown', 'value': value}
@@ -344,13 +353,26 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 already.append(label)
                 outcomes[label]['stage'] = 'already_submitted'
                 return None
+            except (MosRuAuthError, MosRuApiError) as err:
+                if not isinstance(err, MosRuTemporaryError):
+                    outcomes[label]["stage"] = "send_rejected_after_delete" if replace else "send_rejected"
+                raise
 
         try:
             cold_resp = submit_one(cfg[CONF_COLD_ID], cold_val, "холодная")
             hot_resp  = submit_one(cfg[CONF_HOT_ID], hot_val, "горячая")
         except (MosRuAuthError, MosRuApiError) as err:
-            if not outcomes:
-                raise UpdateFailed('Проверка перед записью не пройдена; показания не изменены') from err
+            changed_or_unknown = any(item['stage'] in {
+                'submitted', 'delete_unknown', 'send_unknown',
+                'send_unknown_after_delete', 'send_rejected_after_delete'
+            } for item in outcomes.values())
+            if not changed_or_unknown:
+                if isinstance(err, MosRuAuthError):
+                    self._invalidate_client()
+                    raise ConfigEntryAuthFailed('Сессия портала истекла') from err
+                if isinstance(err, MosRuTemporaryError):
+                    raise
+                raise UpdateFailed('Портал отклонил запись; показания не изменены') from err
             # A timed-out PUT/DELETE may have succeeded remotely. Never delete again
             # automatically, and make uncertainty visible rather than reporting success.
             _LOGGER.error('Запись показаний завершилась частично или с неопределённым результатом')
@@ -362,6 +384,10 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if outcomes.get(label, {}).get('stage') == 'submitted':
                     partial[key] = outcomes[label]['value']
                     partial['last_submitted_at'] = dt_util.now()
+            if isinstance(err, MosRuAuthError):
+                auth_failure = ConfigEntryAuthFailed("Сессия портала истекла после частичной записи")
+                auth_failure.operation_result = partial
+                raise auth_failure from err
             return partial
 
         self._submitted_month = self._current_month()
@@ -445,7 +471,11 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 _LOGGER.warning(
                     "mos.ru временно недоступен, отправка показаний отложена: %s", err
                 )
-            except (UpdateFailed, ConfigEntryAuthFailed):
+            except ConfigEntryAuthFailed as err:
+                if getattr(err, "operation_result", None):
+                    self._persist_operation_guard(err.operation_result)
+                raise
+            except UpdateFailed:
                 raise
             except Exception as err:
                 raise UpdateFailed(f"Неожиданная ошибка при отправке: {err}") from err

@@ -143,7 +143,8 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> FlowResult:
         """Показать QR-код и ждать сканирования."""
         if self._qr_task is None:
-            self._abort_if_in_progress()
+            if self._async_in_progress(include_uninitialized=True):
+                return self.async_abort(reason="already_in_progress")
             try:
                 qr_data = await self.hass.async_add_executor_job(
                     self._client.start_qr_session
@@ -440,7 +441,7 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._counters = []  # падаем в ручной ввод
             self._suggested_counters = pick_counters(self._counters)
             cold_id, hot_id = self._suggested_counters
-            if cold_id and hot_id:
+            if cold_id and hot_id and cold_id != hot_id:
                 # Обычная квартира: один ХВС и один ГВС — спрашивать нечего.
                 self._data[CONF_COLD_ID] = cold_id
                 self._data[CONF_HOT_ID] = hot_id
@@ -449,9 +450,12 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # ── Счётчики найдены, но выбор неоднозначен ──────────────────────
         if self._counters:
             if user_input is not None:
-                self._data[CONF_COLD_ID] = user_input[CONF_COLD_ID]
-                self._data[CONF_HOT_ID]  = user_input[CONF_HOT_ID]
-                return await self.async_step_sensors()
+                if user_input[CONF_COLD_ID] == user_input[CONF_HOT_ID]:
+                    errors["base"] = "duplicate_counters"
+                else:
+                    self._data[CONF_COLD_ID] = user_input[CONF_COLD_ID]
+                    self._data[CONF_HOT_ID] = user_input[CONF_HOT_ID]
+                    return await self.async_step_sensors()
 
             def options(type_name: str) -> list:
                 return [
@@ -472,6 +476,7 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             cold_id, hot_id = self._suggested_counters
             return self.async_show_form(
                 step_id="discover",
+                errors=errors,
                 data_schema=vol.Schema({
                     required(CONF_COLD_ID, cold_id): selector.SelectSelector(
                         selector.SelectSelectorConfig(options=options(COLD_TYPE))
@@ -498,6 +503,8 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors[CONF_COLD_ID] = "required"
             if not hot_id:
                 errors[CONF_HOT_ID] = "required"
+            if cold_id and cold_id == hot_id:
+                errors["base"] = "duplicate_counters"
             if not errors:
                 self._data[CONF_COLD_ID] = cold_id
                 self._data[CONF_HOT_ID]  = hot_id

@@ -53,7 +53,8 @@
       "wrong_unit": "Sensor must return a value in m³",
       "invalid_code": "Invalid confirmation code. Please try again.",
       "required": "This field is required",
-      "cannot_get_places": "Could not get the apartment list from Electronic House: {error}. Submit the form again to retry."
+      "cannot_get_places": "Could not get the apartment list from Electronic House: {error}. Submit the form again to retry.",
+      "duplicate_counters": "Choose different cold and hot water meters"
     },
     "abort": {
       "already_configured": "Integration is already configured",
