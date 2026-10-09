@@ -1,7 +1,7 @@
 {
   "domain": "mosru_water",
   "name": "MOS.RU Water Meter",
-  "version": "2026.9.11",
+  "version": "2026.10.9b2",
   "requirements": [
     "requests==2.34.2",
     "qrcode==8.2"
