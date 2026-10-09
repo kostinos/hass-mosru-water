@@ -4,6 +4,7 @@ from __future__ import annotations
 import functools
 import logging
 import time
+import threading
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -19,6 +20,7 @@ from .api import (
     MosRuApiError,
     MosRuClient,
     MosRuTemporaryError,
+    normalized_reading,
 )
 from .const import (
     DOMAIN,
@@ -43,6 +45,9 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Authorization ed.mos.ru expires after one hour independently of acst.
         self._ed_authorized_at: float | None = None
         self._pending_user_place_id: str | None = None
+        self._io_lock = threading.Lock()
+        self._last_write_at = float('-inf')
+        self._manual_pending = False
 
         super().__init__(
             hass,
@@ -113,7 +118,7 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 cfg[CONF_PAYCODE], cfg.get(CONF_FLAT, "")
             )
             self._pending_user_place_id = user_place_id
-            _LOGGER.info("Определён userPlaceId для ed.mos.ru: %s", user_place_id)
+            _LOGGER.debug('Определён профиль Электронного дома')
 
         return client, str(user_place_id)
 
@@ -146,19 +151,46 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             data={**self._entry.data, CONF_SESSION_COOKIES: new_cookies},
         )
 
+    def _persist_operation_guard(self, result: dict[str, Any]) -> None:
+        """Persist an uncertain mutation so restarting HA cannot retry it automatically."""
+        data = dict(self._entry.data)
+        if result.get('last_status') == 'partial':
+            data['submission_blocked_month'] = self._current_month()
+            data['last_operation'] = result.get('operation_results', {})
+        else:
+            data.pop('submission_blocked_month', None)
+            data.pop('last_operation', None)
+        if data != self._entry.data:
+            self.hass.config_entries.async_update_entry(self._entry, data=data)
+
     def _read_sensor(self, entity_id: str) -> float:
         state = self.hass.states.get(entity_id)
         if state is None or state.state in ("unavailable", "unknown", ""):
             raise UpdateFailed(f"Сенсор {entity_id} недоступен")
         try:
-            return float(state.state)
-        except ValueError as err:
+            value = float(state.state)
+            normalized_reading(value)
+            reported = getattr(state, 'last_reported', None) or state.last_updated
+            if (dt_util.now() - reported).total_seconds() > 48 * 3600:
+                raise UpdateFailed(f'Сенсор {entity_id} не обновлялся более 48 часов')
+            if state.attributes.get('unit_of_measurement') != 'm³':
+                raise UpdateFailed(f'Сенсор {entity_id} должен возвращать м³')
+            return value
+        except (ValueError, MosRuApiError) as err:
             raise UpdateFailed(
-                f"Не удалось прочитать значение {entity_id}: {state.state}"
+                f"Недопустимое значение сенсора {entity_id}"
             ) from err
 
     def _fetch_device_info(self) -> dict[str, Any]:
         """Получить текущий статус счётчиков из API (синхронно)."""
+        if not self._io_lock.acquire(blocking=False):
+            raise MosRuTemporaryError('Операция с mos.ru уже выполняется')
+        try:
+            return self._fetch_device_info_unlocked()
+        finally:
+            self._io_lock.release()
+
+    def _fetch_device_info_unlocked(self) -> dict[str, Any]:
         cfg = self._get_effective_config()
         client, user_place_id = self._prepare_client()
 
@@ -199,10 +231,23 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def async_submit_now(self) -> dict[str, Any]:
         """Отправить показания прямо сейчас (вызывается из button.py)."""
-        result = await self.hass.async_add_executor_job(self._submit)
-        self._persist_cookies()
-        self._persist_user_place_id()
-        return result
+        return await self._async_manual_submit(replace=False)
+
+    async def _async_manual_submit(self, *, replace: bool) -> dict[str, Any]:
+        last = max(self._last_write_at, getattr(self, '_last_manual_at', float('-inf')))
+        if self._manual_pending or self._io_lock.locked() or time.monotonic() - last < 60:
+            raise UpdateFailed('Операция уже выполняется или недавно выполнялась; попробуйте позже')
+        self._manual_pending = True
+        self._last_manual_at = time.monotonic()
+        try:
+            result = await self.hass.async_add_executor_job(
+                functools.partial(self._submit, replace=replace))
+            self._persist_cookies()
+            self._persist_user_place_id()
+            self._persist_operation_guard(result)
+            return result
+        finally:
+            self._manual_pending = False
 
     async def async_replace_readings(self) -> dict[str, Any]:
         """Перезаписать показания за текущий период.
@@ -212,14 +257,21 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         запись независимо от того, кто её внёс — она могла прийти от управляющей
         компании, а не от интеграции.
         """
-        result = await self.hass.async_add_executor_job(
-            functools.partial(self._submit, replace=True)
-        )
-        self._persist_cookies()
-        self._persist_user_place_id()
-        return result
+        return await self._async_manual_submit(replace=True)
 
     def _submit(self, *, replace: bool = False) -> dict[str, Any]:
+        """Serialize reads/writes on the Session and reject overlapping mutations."""
+        if not self._io_lock.acquire(blocking=False):
+            raise UpdateFailed('Операция с mos.ru уже выполняется')
+        try:
+            if time.monotonic() - self._last_write_at < 60:
+                raise UpdateFailed('Подождите минуту перед повторной отправкой')
+            self._last_write_at = time.monotonic()
+            return self._submit_unlocked(replace=replace)
+        finally:
+            self._io_lock.release()
+
+    def _submit_unlocked(self, *, replace: bool = False) -> dict[str, Any]:
         """Отправить показания на ed.mos.ru.
 
         replace=True — сначала удалить последнее показание, чтобы перезаписать
@@ -227,34 +279,90 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         пользователя (сервис mosru_water.replace_readings).
         """
         cfg = self._get_effective_config()
-        cold_val = self._read_sensor(cfg[CONF_COLD_ENTITY])
-        hot_val  = self._read_sensor(cfg[CONF_HOT_ENTITY])
+        if (cfg[CONF_COLD_ENTITY] == cfg[CONF_HOT_ENTITY]
+                or cfg[CONF_COLD_ID] == cfg[CONF_HOT_ID]):
+            raise UpdateFailed('Холодная и горячая вода должны использовать разные сенсоры и счётчики')
+        cold_val = normalized_reading(self._read_sensor(cfg[CONF_COLD_ENTITY]))
+        hot_val  = normalized_reading(self._read_sensor(cfg[CONF_HOT_ENTITY]))
         client, user_place_id = self._prepare_client()
 
+        # Validate BOTH targets before any PUT/DELETE, including manually supplied IDs.
+        try:
+            device_map = client.get_device_info(user_place_id)
+        except MosRuAuthError as err:
+            self._invalidate_client()
+            raise ConfigEntryAuthFailed('Сессия портала истекла') from err
+        closed_current = set()
+        for counter_id, value in ((cfg[CONF_COLD_ID], cold_val), (cfg[CONF_HOT_ID], hot_val)):
+            info = device_map.get(counter_id)
+            if not info:
+                raise UpdateFailed('Счётчик не найден в выбранной квартире')
+            if info.get('readonly', True):
+                if not replace and str(info.get('reading_period', ''))[:7] == self._current_month():
+                    closed_current.add(counter_id)
+                    continue
+                raise UpdateFailed('Портал не разрешает изменение показаний этого счётчика')
+            previous = info.get('current_reading')
+            try:
+                previous = float(previous)
+                normalized_reading(previous)
+            except (ValueError, TypeError, MosRuApiError) as err:
+                raise UpdateFailed('Не удалось проверить предыдущее показание портала') from err
+            if value < previous or value - previous > 100:
+                raise UpdateFailed('Показание уменьшилось или выросло более чем на 100 м³; проверьте его на портале')
+            if replace and str(info.get('reading_period', ''))[:7] != self._current_month():
+                raise UpdateFailed('Можно заменять только показания текущего месяца')
+
         already: list[str] = []
+        outcomes: dict[str, Any] = {}
 
         def submit_one(counter_id: str, value: float, label: str) -> dict[str, Any] | None:
+            if counter_id in closed_current:
+                already.append(label)
+                outcomes[label] = {'stage': 'already_submitted'}
+                return None
             if replace:
+                latest = client.get_device_info(user_place_id).get(counter_id, {})
+                expected = device_map[counter_id]
+                if (latest.get('readonly', True)
+                        or latest.get('reading_period') != expected.get('reading_period')
+                        or latest.get('current_reading') != expected.get('current_reading')):
+                    raise MosRuApiError('Показание на портале изменилось; удаление отменено')
+                outcomes[label] = {'stage': 'delete_unknown', 'value': value}
                 client.remove_last_indication(user_place_id, counter_id)
+                outcomes[label]['stage'] = 'send_unknown_after_delete'
+            else:
+                outcomes[label] = {'stage': 'send_unknown', 'value': value}
             try:
-                return client.send_reading(user_place_id, counter_id, value)
+                response = client.send_reading(user_place_id, counter_id, value)
+                outcomes[label]['stage'] = 'submitted'
+                return response
             except MosRuAlreadySubmittedError:
                 # Портал не перезаписывает показание за период: это не сбой,
                 # а сигнал «уже сдано». Перезапись — отдельной командой.
                 _LOGGER.info("%s: показание за период уже внесено на портале", label)
                 already.append(label)
+                outcomes[label]['stage'] = 'already_submitted'
                 return None
 
         try:
             cold_resp = submit_one(cfg[CONF_COLD_ID], cold_val, "холодная")
             hot_resp  = submit_one(cfg[CONF_HOT_ID], hot_val, "горячая")
-        except MosRuAuthError as err:
-            self._invalidate_client()
-            raise ConfigEntryAuthFailed(str(err)) from err
-        except MosRuTemporaryError:
-            raise  # отправку повторит следующий цикл координатора
-        except MosRuApiError as err:
-            raise UpdateFailed(f"Ошибка отправки: {err}") from err
+        except (MosRuAuthError, MosRuApiError) as err:
+            if not outcomes:
+                raise UpdateFailed('Проверка перед записью не пройдена; показания не изменены') from err
+            # A timed-out PUT/DELETE may have succeeded remotely. Never delete again
+            # automatically, and make uncertainty visible rather than reporting success.
+            _LOGGER.error('Запись показаний завершилась частично или с неопределённым результатом')
+            if isinstance(err, MosRuAuthError):
+                self._invalidate_client()
+            self._submitted_month = self._current_month()
+            partial = {'last_status': 'partial', 'operation_results': outcomes}
+            for label, key in (('холодная', 'last_cold'), ('горячая', 'last_hot')):
+                if outcomes.get(label, {}).get('stage') == 'submitted':
+                    partial[key] = outcomes[label]['value']
+                    partial['last_submitted_at'] = dt_util.now()
+            return partial
 
         self._submitted_month = self._current_month()
         # Aware datetime: сенсор объявлен device_class TIMESTAMP, HA требует tzinfo.
@@ -270,14 +378,20 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 cold_val, hot_val,
             )
 
-        return {
-            "last_cold":         cold_val,
-            "last_hot":          hot_val,
+        result = {
             "last_status":       "already_submitted" if len(already) == 2 else "success",
             "last_submitted_at": submitted_at,
             "cold_response":     cold_resp,
             "hot_response":      hot_resp,
+            "operation_results": outcomes,
         }
+        if 'холодная' not in already:
+            result['last_cold'] = cold_val
+        if 'горячая' not in already:
+            result['last_hot'] = hot_val
+        if len(already) == 2:
+            result.pop('last_submitted_at')
+        return result
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Вызывается каждые 45 минут. Всегда опрашивает статус; отправляет в нужный день."""
@@ -304,20 +418,26 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         prev = self.data or {}
         result: dict[str, Any] = {}
-        for key in ("last_cold", "last_hot", "last_status", "last_submitted_at"):
+        for key in ("last_cold", "last_hot", "last_status", "last_submitted_at", "operation_results"):
             if key in prev:
                 result[key] = prev[key]
         result.update(device_data)
 
         cfg = self._get_effective_config()
         submit_day = int(cfg.get(CONF_SUBMIT_DAY, 20))
+        blocked = cfg.get('submission_blocked_month') == self._current_month()
+        if blocked:
+            result['last_status'] = 'partial'
+            result['operation_results'] = cfg.get('last_operation', {})
         if (
             datetime.now().day == submit_day
             and self._submitted_month != self._current_month()
+            and not blocked
         ):
             try:
                 submit_result = await self.hass.async_add_executor_job(self._submit)
                 self._persist_cookies()
+                self._persist_operation_guard(submit_result)
                 result.update(submit_result)
             except MosRuTemporaryError as err:
                 # _submitted_month не выставлен — попробуем снова через час,

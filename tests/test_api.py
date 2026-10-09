@@ -79,7 +79,7 @@ class ParseResponseTest(unittest.TestCase):
     """Разбор ответов: главное — не считать провал успехом."""
 
     def test_success_passthrough(self):
-        payload = {"data": {"result": True, "counterId": 1158038}}
+        payload = {"data": {"result": True, "counterId": 900101}}
         self.assertEqual(_parse_api_response(FakeResponse(200, payload)), payload)
 
     def test_already_submitted_is_dedicated_error(self):
@@ -141,14 +141,14 @@ class ClientCallsTest(unittest.TestCase):
 
     def test_send_reading_uses_put_and_int_indication(self):
         self._reply(200, {"data": {"result": True}})
-        self.client.send_reading("1152619", "1158038", 483.74, period="2026-08-31")
+        self.client.send_reading("900001", "900101", 483.74, period="2026-08-31")
 
         method, url = self.session.request.call_args[0]
         params = self.session.request.call_args.kwargs["params"]
         self.assertEqual(method, "PUT")
         self.assertTrue(url.endswith("/efp/counters/addIndications/"))
-        self.assertEqual(params["userPlaceId"], "1152619")
-        self.assertEqual(params["counterId"], "1158038")
+        self.assertEqual(params["userPlaceId"], "900001")
+        self.assertEqual(params["counterId"], "900101")
         # Портал принимает только целые м³
         self.assertEqual(params["indication"], 484)
         self.assertIsInstance(params["indication"], int)
@@ -156,58 +156,58 @@ class ClientCallsTest(unittest.TestCase):
 
     def test_send_reading_defaults_period_to_end_of_month(self):
         self._reply(200, {"data": {"result": True}})
-        self.client.send_reading("1152619", "1158038", 100.0)
+        self.client.send_reading("900001", "900101", 100.0)
         params = self.session.request.call_args.kwargs["params"]
         self.assertEqual(params["period"], _period_end_of_month())
 
     def test_send_reading_rejects_result_false(self):
         self._reply(200, {"data": {"result": False}})
         with self.assertRaises(MosRuApiError):
-            self.client.send_reading("1152619", "1158038", 100.0)
+            self.client.send_reading("900001", "900101", 100.0)
 
     def test_send_reading_propagates_already_submitted(self):
         self._reply(400, {"code": 400, "error": "Показание за данный период уже внесено."})
         with self.assertRaises(MosRuAlreadySubmittedError):
-            self.client.send_reading("1152619", "1158038", 100.0)
+            self.client.send_reading("900001", "900101", 100.0)
 
     def test_send_reading_does_not_retry(self):
         """Повтор PUT мог бы создать дубль — ретраи здесь запрещены."""
         self._reply(503, {})
         with self.assertRaises(MosRuTemporaryError):
-            self.client.send_reading("1152619", "1158038", 100.0)
+            self.client.send_reading("900001", "900101", 100.0)
         self.assertEqual(self.session.request.call_count, 1)
 
     def test_remove_last_indication_uses_delete(self):
         self._reply(200, {"data": {"result": True}})
-        self.client.remove_last_indication("1152619", "1158038")
+        self.client.remove_last_indication("900001", "900101")
 
         method, url = self.session.request.call_args[0]
         params = self.session.request.call_args.kwargs["params"]
         self.assertEqual(method, "DELETE")
         self.assertTrue(url.endswith("/efp/counters/removeLastValue/"))
-        self.assertEqual(params, {"counterId": "1158038", "userPlaceId": "1152619"})
+        self.assertEqual(params, {"counterId": "900101", "userPlaceId": "900001"})
 
 
-# Ответ listByPayerCode, сокращённый до используемых полей (из HAR).
+# Synthetic household identifiers; only the response shape follows the API.
 _COUNTERS_PAYLOAD = {
     "data": [{
-        "userPlaceId": 1152619,
-        "fls": "1730249056",
-        "flat": "218",
+        "userPlaceId": 900001,
+        "fls": "0000000101",
+        "flat": "12",
         "activeCounters": [
             {
-                "counterId": 1158038,
+                "counterId": 900101,
                 "typeName": "ХВС",
-                "num": "14-007378",
+                "num": "TEST-COLD-001",
                 "checkUpDate": "2032-07-16",
                 "checkupStatus": "OK",
                 "enableTransfer": True,
                 "lastIndication": {"period": "2026-08-31", "indication": 483.0, "source": "22"},
             },
             {
-                "counterId": 1158039,
+                "counterId": 900102,
                 "typeName": "ГВС",
-                "num": "14-087265",
+                "num": "TEST-HOT-001",
                 "checkUpDate": "2032-07-16",
                 "checkupStatus": "OK",
                 "enableTransfer": False,
@@ -226,31 +226,31 @@ class CountersParsingTest(unittest.TestCase):
         self.session.request.return_value = FakeResponse(200, _COUNTERS_PAYLOAD)
 
     def test_get_counters(self):
-        self.assertEqual(self.client.get_counters("1152619"), [
-            {"id": "1158038", "name": "14-007378", "type": "ХВС"},
-            {"id": "1158039", "name": "14-087265", "type": "ГВС"},
+        self.assertEqual(self.client.get_counters("900001"), [
+            {"id": "900101", "name": "TEST-COLD-001", "type": "ХВС"},
+            {"id": "900102", "name": "TEST-HOT-001", "type": "ГВС"},
         ])
 
     def test_get_device_info_maps_fields(self):
-        info = self.client.get_device_info("1152619")
-        self.assertEqual(set(info), {"1158038", "1158039"})
-        cold = info["1158038"]
+        info = self.client.get_device_info("900001")
+        self.assertEqual(set(info), {"900101", "900102"})
+        cold = info["900101"]
         self.assertEqual(cold["type"], "ХВС")
-        self.assertEqual(cold["number"], "14-007378")
+        self.assertEqual(cold["number"], "TEST-COLD-001")
         self.assertEqual(cold["current_reading"], 483.0)
         self.assertEqual(cold["reading_period"], "2026-08-31")
         self.assertEqual(cold["inspection_date"], "2032-07-16")
         self.assertEqual(cold["inspection_status"], "OK")
 
     def test_readonly_inverts_enable_transfer(self):
-        info = self.client.get_device_info("1152619")
-        self.assertFalse(info["1158038"]["readonly"])   # enableTransfer: True
-        self.assertTrue(info["1158039"]["readonly"])    # enableTransfer: False
+        info = self.client.get_device_info("900001")
+        self.assertFalse(info["900101"]["readonly"])   # enableTransfer: True
+        self.assertTrue(info["900102"]["readonly"])    # enableTransfer: False
 
     def test_unexpected_payload_raises(self):
         self.session.request.return_value = FakeResponse(200, {"data": None})
         with self.assertRaises(MosRuApiError):
-            self.client.get_device_info("1152619")
+            self.client.get_device_info("900001")
 
     def test_missing_active_counters_is_empty(self):
         self.session.request.return_value = FakeResponse(200, {"data": [{"userPlaceId": 1}]})
@@ -260,10 +260,10 @@ class CountersParsingTest(unittest.TestCase):
 # Ответ getInfo: квартиры лежат в data.addresses, flat приходит числом.
 _PROFILE_PAYLOAD = {
     "data": {
-        "user": {"nickName": "Олег К"},
+        "user": {"nickName": "Тестовый профиль"},
         "addresses": [
             {"userPlaceId": 999001, "fls": "1111111111", "flat": 5},
-            {"userPlaceId": 1152619, "fls": "1730249056", "flat": 218},
+            {"userPlaceId": 900001, "fls": "0000000101", "flat": 12},
         ],
     }
 }
@@ -277,18 +277,18 @@ class FindUserPlaceIdTest(unittest.TestCase):
         self.session.request.return_value = FakeResponse(200, _PROFILE_PAYLOAD)
 
     def test_finds_by_paycode_and_flat(self):
-        self.assertEqual(self.client.find_user_place_id("1730249056", "218"), "1152619")
+        self.assertEqual(self.client.find_user_place_id("0000000101", "12"), "900001")
 
     def test_flat_compared_as_string(self):
         """flat в ответе — число, в конфиге строка: сравнение должно совпасть."""
-        self.assertEqual(self.client.find_user_place_id("1730249056", 218), "1152619")
+        self.assertEqual(self.client.find_user_place_id("0000000101", 12), "900001")
 
     def test_paycode_only(self):
         self.assertEqual(self.client.find_user_place_id("1111111111", ""), "999001")
 
     def test_wrong_flat_not_matched(self):
         with self.assertRaises(MosRuApiError):
-            self.client.find_user_place_id("1730249056", "999")
+            self.client.find_user_place_id("0000000101", "999")
 
     def test_unknown_paycode_raises(self):
         with self.assertRaises(MosRuApiError):
@@ -297,7 +297,7 @@ class FindUserPlaceIdTest(unittest.TestCase):
     def test_empty_addresses(self):
         self.session.request.return_value = FakeResponse(200, {"data": {}})
         with self.assertRaises(MosRuApiError):
-            self.client.find_user_place_id("1730249056", "218")
+            self.client.find_user_place_id("0000000101", "12")
 
 
 class AuthorizeEdTest(unittest.TestCase):

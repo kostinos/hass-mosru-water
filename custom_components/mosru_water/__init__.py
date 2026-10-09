@@ -9,6 +9,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.service import async_register_admin_service
 
 from .const import DOMAIN
 from .coordinator import MosRuWaterCoordinator
@@ -20,7 +21,10 @@ PLATFORMS = ["sensor", "button"]
 SERVICE_REPLACE_READINGS = "replace_readings"
 ATTR_ENTRY_ID = "entry_id"
 
-_REPLACE_SCHEMA = vol.Schema({vol.Optional(ATTR_ENTRY_ID): cv.string})
+_REPLACE_SCHEMA = vol.Schema({
+    vol.Optional(ATTR_ENTRY_ID): cv.string,
+    vol.Required('confirm', default=False): cv.boolean,
+})
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -51,6 +55,8 @@ def _async_register_services(hass: HomeAssistant) -> None:
         Отдельный сервис, а не автоматика: удаляется последнее показание
         независимо от источника, поэтому решение принимает пользователь.
         """
+        if call.data.get('confirm') is not True:
+            raise ServiceValidationError('Для удаления показаний укажите confirm: true')
         coordinators: dict[str, MosRuWaterCoordinator] = hass.data.get(DOMAIN, {})
         entry_id = call.data.get(ATTR_ENTRY_ID)
         if entry_id:
@@ -70,9 +76,12 @@ def _async_register_services(hass: HomeAssistant) -> None:
             merged = dict(coordinator.data or {})
             merged.update(result)
             coordinator.async_set_updated_data(merged)
+            if result.get('last_status') == 'partial':
+                raise ServiceValidationError(
+                    'Операция выполнена частично. Проверьте показания на mos.ru перед повтором.')
 
-    hass.services.async_register(
-        DOMAIN, SERVICE_REPLACE_READINGS, _handle_replace, schema=_REPLACE_SCHEMA
+    async_register_admin_service(
+        hass, DOMAIN, SERVICE_REPLACE_READINGS, _handle_replace, schema=_REPLACE_SCHEMA
     )
 
 

@@ -1,5 +1,6 @@
 """Exercise coordinator session expiry and recovery without running HA."""
 import ast
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -19,7 +20,7 @@ class SessionRefreshTest(unittest.TestCase):
         tree = ast.parse(SOURCE.read_text())
         cls = next(n for n in tree.body if isinstance(n, ast.ClassDef))
         cls.bases = []
-        names = {'_prepare_client', '_fetch_device_info', '_invalidate_client'}
+        names = {'_prepare_client', '_fetch_device_info', '_fetch_device_info_unlocked', '_invalidate_client'}
         cls.body = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in names]
         module = ast.Module(body=[ast.ImportFrom(module='__future__', names=[
             ast.alias(name='annotations')], level=0), cls], type_ignores=[])
@@ -32,6 +33,7 @@ class SessionRefreshTest(unittest.TestCase):
             ns['CONF_' + name] = name.lower()
         exec(compile(ast.fix_missing_locations(module), str(SOURCE), 'exec'), ns)
         self.coordinator = ns['MosRuWaterCoordinator']()
+        self.coordinator._io_lock = threading.Lock()
         self.client = Mock()
         self.client.try_refresh_acst.return_value = True
         self.client.get_device_info.return_value = {}

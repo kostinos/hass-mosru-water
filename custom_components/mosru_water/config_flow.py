@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
+import secrets
 import time
 from typing import Any
 
@@ -18,7 +20,7 @@ from homeassistant.components.persistent_notification import (
     async_dismiss as pn_dismiss,
 )
 
-from .api import MosRuAuthError, MosRuApiError, MosRuClient
+from .api import MosRuAuthError, MosRuApiError, MosRuClient, trusted_url
 from .const import (
     DOMAIN,
     CONF_PAYCODE, CONF_FLAT, CONF_USER_PLACE_ID,
@@ -52,7 +54,15 @@ def _write_qr_svg(www_dir: str, link: str, cache_buster: int) -> str:
         import qrcode.image.svg
 
         os.makedirs(www_dir, exist_ok=True)
-        qr_path = os.path.join(www_dir, _QR_FILE)
+        trusted_url(link, qr=True)
+        # Remove the old predictable artifact and expired artifacts after a crash.
+        for name in os.listdir(www_dir):
+            if name == _QR_FILE or re.fullmatch(r'mosru_water_qr_[a-f0-9]{32}\.svg', name):
+                path = os.path.join(www_dir, name)
+                if name == _QR_FILE or time.time() - os.stat(path).st_mtime > 300:
+                    os.remove(path)
+        name = f'mosru_water_qr_{secrets.token_hex(16)}.svg'
+        qr_path = os.path.join(www_dir, name)
         factory = qrcode.image.svg.SvgFillImage
         qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, border=2)
         qr.add_data(link)
@@ -60,10 +70,19 @@ def _write_qr_svg(www_dir: str, link: str, cache_buster: int) -> str:
         qr_img = qr.make_image(image_factory=factory)
         with open(qr_path, "wb") as f:
             qr_img.save(f)
-        return f"/local/{_QR_FILE}?t={cache_buster}"
+        return f"/local/{name}?t={cache_buster}"
     except Exception:
         _LOGGER.exception("Не удалось сгенерировать QR-код")
         return ""
+
+
+def _delete_qr_svg(www_dir: str, url: str) -> None:
+    name = url.split('?', 1)[0].removeprefix('/local/')
+    if re.fullmatch(r'mosru_water_qr_[a-f0-9]{32}\.svg', name):
+        try:
+            os.remove(os.path.join(www_dir, name))
+        except FileNotFoundError:
+            pass
 
 
 class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -80,6 +99,25 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._qr_url: str = ""
         self._qr_link: str = ""
         self._reauth_entry: config_entries.ConfigEntry | None = None
+
+    async def _async_cleanup_qr(self, url: str | None = None) -> None:
+        url = self._qr_url if url is None else url
+        if self._qr_url == url:
+            self._qr_url = ''
+        if url:
+            await self.hass.async_add_executor_job(
+                _delete_qr_svg, self.hass.config.path('www'), url)
+
+    def _qr_finished(self, task: asyncio.Task) -> None:
+        if task is self._qr_task:
+            self.hass.async_create_task(self._async_cleanup_qr(self._qr_url))
+
+    @callback
+    def async_remove(self) -> None:
+        if self._qr_task is not None and not self._qr_task.done():
+            self._qr_task.cancel()
+        self.hass.async_create_task(self._async_cleanup_qr())
+        pn_dismiss(self.hass, notification_id='mosru_water_qr')
 
     # ── Шаг 1: код плательщика и квартира ────────────────────────────────
 
@@ -124,6 +162,7 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 _write_qr_svg, www_dir, self._qr_link, ts
             )
             self._qr_task = self.hass.async_create_task(self._poll_qr_scan())
+            self._qr_task.add_done_callback(self._qr_finished)
             self._notify_qr_auth()
 
         if not self._qr_task.done():
@@ -138,6 +177,7 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
 
         # Задача завершена
+        await self._async_cleanup_qr()
         try:
             result = self._qr_task.result()
         except Exception:
@@ -229,6 +269,7 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ts = int(time.time())
                     www_dir = self.hass.config.path("www")
                     self._qr_link = qr_data["link"]
+                    await self._async_cleanup_qr()
                     self._qr_url = await self.hass.async_add_executor_job(
                         _write_qr_svg, www_dir, self._qr_link, ts
                     )

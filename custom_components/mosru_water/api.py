@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import calendar
 import logging
+import math
 import re
 import time
 import urllib.parse
@@ -82,6 +83,59 @@ _TRANSIENT_CODES   = {"retry_later", "service_unavailable", "temporarily_unavail
 _RETRY_ATTEMPTS    = 2    # дополнительные попытки для идемпотентных запросов
 _RETRY_DELAY       = 5    # пауза между попытками, сек
 
+_TRUSTED_HOSTS = {'login.mos.ru', 'www.mos.ru', 'ed.mos.ru', 'my.mos.ru'}
+_MAX_RESPONSE_BYTES = 2_000_000
+
+
+def trusted_url(value: str, *, qr: bool = False) -> str:
+    """Reject external origins before following redirects or publishing QR links."""
+    parts = urllib.parse.urlsplit(value)
+    hosts = {'login.mos.ru'} if qr else _TRUSTED_HOSTS
+    if (parts.scheme != 'https' or parts.hostname not in hosts
+            or parts.port not in (None, 443) or parts.username is not None
+            or parts.password is not None or any(c in value for c in '\\<>[]()')
+            or any(ord(c) <= 32 for c in value)):
+        raise MosRuApiError('Недопустимый адрес сервиса mos.ru')
+    return value
+
+
+def normalized_reading(value: float) -> int:
+    """Validate before integer rounding and before any destructive operation."""
+    if not math.isfinite(value) or value < 0 or value > 1_000_000_000:
+        raise MosRuApiError('Недопустимое показание счётчика')
+    return int(round(value))
+
+
+class MosRuSession(requests.Session):
+    """Validate every prepared request, including redirects, and cap response bodies."""
+
+    def __init__(self):
+        super().__init__()
+        self.trust_env = False
+        self.hooks['response'].append(self._bounded_response)
+
+    @staticmethod
+    def _bounded_response(response, **kwargs):
+        chunks = []
+        total = 0
+        try:
+            for chunk in response.iter_content(65536):
+                total += len(chunk)
+                if total > _MAX_RESPONSE_BYTES:
+                    raise requests.RequestException('Ответ сервиса слишком большой')
+                chunks.append(chunk)
+        except Exception:
+            response.close()
+            raise
+        response._content = b''.join(chunks)
+        response._content_consumed = True
+        return response
+
+    def send(self, request, **kwargs):
+        trusted_url(request.url)
+        kwargs['stream'] = True
+        return super().send(request, **kwargs)
+
 
 def _period_end_of_month(today: date | None = None) -> str:
     """Последний день текущего месяца в формате YYYY-MM-DD.
@@ -155,12 +209,12 @@ def _parse_api_response(resp: requests.Response) -> dict:
     except ValueError as err:
         raise MosRuApiError("Неожиданный формат ответа") from err
     if not isinstance(data, dict):
-        raise MosRuApiError(f"Неожиданный формат ответа: {repr(data)[:200]}")
+        raise MosRuApiError('Неожиданный формат ответа')
 
     code = str(data.get("code", "")).lower()
     if code in _TRANSIENT_CODES:
         raise MosRuTemporaryError(
-            data.get("message") or f"сервис временно недоступен ({code})"
+            f"сервис временно недоступен ({code})"
         )
     # ed.mos.ru сообщает об ошибке в поле "error" строкой, а не флагом.
     err_text = data.get("error") if isinstance(data.get("error"), str) else None
@@ -170,13 +224,12 @@ def _parse_api_response(resp: requests.Response) -> dict:
     # Проверяем после разбора JSON, чтобы включить в сообщение текст от сервера.
     if not resp.ok:
         raise MosRuApiError(
-            f"HTTP {resp.status_code}: "
-            f"{err_text or data.get('message') or repr(data)[:200]}"
+            f"HTTP {resp.status_code}: запрос отклонён"
         )
     if err_text:
-        raise MosRuApiError(f"Ошибка API: {err_text}")
+        raise MosRuApiError('Ошибка API')
     if data.get("error") is True:
-        raise MosRuApiError(f"Ошибка API: {repr(data)[:200]}")
+        raise MosRuApiError('Ошибка API')
     return data
 
 
@@ -184,7 +237,7 @@ class MosRuClient:
     """HTTP-клиент для работы с mos.ru."""
 
     def __init__(self) -> None:
-        self._session = requests.Session()
+        self._session = MosRuSession()
         self._session.headers.update({"User-Agent": _USER_AGENT})
         self._login_referer = "https://login.mos.ru/"
         self._poll_counter: int = int(datetime.now().timestamp() * 1000)
@@ -220,17 +273,17 @@ class MosRuClient:
                 timeout=_TIMEOUT,
             )
             if resp.status_code in (301, 302, 303, 307, 308):
-                raise MosRuApiError(f"QR-сессия: редирект → {resp.headers.get('Location', '?')[:100]}")
+                raise MosRuApiError('Неожиданный редирект QR-сессии')
             data = resp.json()
         except requests.RequestException as err:
-            raise MosRuApiError(f"Сетевая ошибка: {err}") from err
+            raise MosRuApiError("Сетевая ошибка mos.ru") from err
         except ValueError as err:
             raise MosRuApiError("Неожиданный формат ответа") from err
 
         if not data.get("link"):
-            raise MosRuApiError(f"QR-сессия не запустилась: {data!r}")
+            raise MosRuApiError('QR-сессия не запустилась')
 
-        return {"link": data["link"], "expires": data.get("expires", 0)}
+        return {"link": trusted_url(data["link"], qr=True), "expires": data.get("expires", 0)}
 
     def poll_qr(self) -> str:
         """Опросить статус QR-сессии.
@@ -251,20 +304,18 @@ class MosRuClient:
                 timeout=_TIMEOUT,
             )
             if resp.status_code in (301, 302, 303, 307, 308):
-                loc = resp.headers.get("Location", "?")
-                _LOGGER.error("poll_qr: редирект → %s", loc[:200])
-                raise MosRuApiError(f"Редирект: {loc[:100]}")
+                _LOGGER.error('poll_qr: неожиданный редирект (status=%d)', resp.status_code)
+                raise MosRuApiError('Неожиданный редирект QR-сессии')
             try:
                 return resp.json().get("command", "")
             except ValueError:
                 _LOGGER.error(
-                    "poll_qr: не JSON (status=%d): %r",
+                    "poll_qr: не JSON (status=%d)",
                     resp.status_code,
-                    resp.text[:600],
                 )
                 raise MosRuApiError("Неожиданный формат ответа")
         except requests.RequestException as err:
-            raise MosRuApiError(f"Сетевая ошибка: {err}") from err
+            raise MosRuApiError("Сетевая ошибка mos.ru") from err
 
     def refresh_qr(self) -> dict:
         """Обновить истёкший QR-код.
@@ -285,8 +336,8 @@ class MosRuClient:
             )
             data = resp.json()
         except requests.RequestException as err:
-            raise MosRuApiError(f"Сетевая ошибка: {err}") from err
-        return {"link": data.get("link", ""), "expires": data.get("expires", 0)}
+            raise MosRuApiError("Сетевая ошибка mos.ru") from err
+        return {"link": trusted_url(data.get("link", ""), qr=True), "expires": data.get("expires", 0)}
 
     def complete_qr_auth(self) -> str:
         """Завершить QR-авторизацию: POST qrCode/complete.
@@ -302,7 +353,7 @@ class MosRuClient:
                 timeout=_TIMEOUT,
             )
         except requests.RequestException as err:
-            raise MosRuApiError(f"Сетевая ошибка: {err}") from err
+            raise MosRuApiError("Сетевая ошибка mos.ru") from err
         if resp.status_code >= 400:
             raise MosRuAuthError("Ошибка завершения QR-авторизации")
         if "methods2/sms" in resp.url or "/methods/sms" in resp.url:
@@ -338,7 +389,7 @@ class MosRuClient:
                 timeout=_TIMEOUT,
             )
         except requests.RequestException as err:
-            raise MosRuApiError(f"Сетевая ошибка: {err}") from err
+            raise MosRuApiError("Сетевая ошибка mos.ru") from err
 
         if resp.status_code >= 400:
             raise MosRuAuthError("Неверный SMS-код")
@@ -371,7 +422,7 @@ class MosRuClient:
                     timeout=_TIMEOUT,
                 )
             except requests.RequestException as err:
-                raise MosRuApiError(f"Сетевая ошибка: {err}") from err
+                raise MosRuApiError("Сетевая ошибка mos.ru") from err
 
             # Следуем редиректам вручную
             for step in range(15):
@@ -398,7 +449,7 @@ class MosRuClient:
                         timeout=_TIMEOUT,
                     )
                 except requests.RequestException as err:
-                    raise MosRuApiError(f"Сетевая ошибка: {err}") from err
+                    raise MosRuApiError("Сетевая ошибка mos.ru") from err
 
             if resp2.status_code >= 400 and resp2.status_code < 500:
                 raise MosRuAuthError("Ошибка доверия устройству")
@@ -460,7 +511,7 @@ class MosRuClient:
                     timeout=_TIMEOUT,
                 )
             except requests.RequestException as err:
-                _LOGGER.warning("warm_session %s failed: %s", url, err)
+                _LOGGER.warning("Не удалось прогреть сессию mos.ru")
 
     def get_session_cookies(self) -> dict:
         """Вернуть текущие cookies с доменами для сохранения в конфиге."""
@@ -471,7 +522,7 @@ class MosRuClient:
 
     def restore_session(self, cookies: dict) -> None:
         """Восстановить сессию из сохранённых cookies (с доменами)."""
-        self._session = requests.Session()
+        self._session = MosRuSession()
         self._session.headers.update({"User-Agent": _USER_AGENT})
         self._login_referer = "https://login.mos.ru/"
         for name, data in cookies.items():
@@ -507,7 +558,7 @@ class MosRuClient:
             try:
                 resp = self._session.request(method, url, timeout=_TIMEOUT, **kwargs)
             except requests.RequestException as err:
-                last_err = MosRuTemporaryError(f"Сетевая ошибка: {err}")
+                last_err = MosRuTemporaryError("Сетевая ошибка mos.ru")
                 continue
             try:
                 return _parse_api_response(resp)
@@ -532,7 +583,7 @@ class MosRuClient:
                 timeout=_TIMEOUT,
             )
         except requests.RequestException as err:
-            raise MosRuTemporaryError(f"Сетевая ошибка при входе в ed.mos.ru: {err}") from err
+            raise MosRuTemporaryError("Сетевая ошибка при входе в ed.mos.ru") from err
 
         if resp.status_code in _TRANSIENT_STATUS:
             raise MosRuTemporaryError(f"ed.mos.ru OAuth: HTTP {resp.status_code}")
@@ -550,7 +601,7 @@ class MosRuClient:
                 timeout=_TIMEOUT,
             )
         except requests.RequestException as err:
-            raise MosRuTemporaryError(f"Сетевая ошибка ed.mos.ru auth: {err}") from err
+            raise MosRuTemporaryError("Сетевая ошибка ed.mos.ru auth") from err
 
         if auth.status_code in _TRANSIENT_STATUS:
             raise MosRuTemporaryError(f"ed.mos.ru auth: HTTP {auth.status_code}")
@@ -666,13 +717,13 @@ class MosRuClient:
             params={
                 "userPlaceId": user_place_id,
                 "counterId": counter_id,
-                "indication": int(round(value_m3)),
+                "indication": normalized_reading(value_m3),
                 "period": period or _period_end_of_month(),
             },
             headers=_XHR_HEADERS,
         )
         if not (data.get("data") or {}).get("result"):
-            raise MosRuApiError(f"Показание не принято: {repr(data)[:200]}")
+            raise MosRuApiError('Показание не принято')
         return data
 
     def remove_last_indication(self, user_place_id: str, counter_id: str) -> dict:
@@ -692,5 +743,5 @@ class MosRuClient:
             headers=_XHR_HEADERS,
         )
         if not (data.get("data") or {}).get("result"):
-            raise MosRuApiError(f"Показание не удалено: {repr(data)[:200]}")
+            raise MosRuApiError('Показание не удалено')
         return data

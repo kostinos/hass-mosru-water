@@ -19,6 +19,7 @@ def load_flow_methods():
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef))
     names = {"__init__", "async_step_reauth", "_notify_qr_auth", "_poll_qr_scan",
              "async_step_qr", "async_step_code"}
+    names.update({'_async_cleanup_qr', '_qr_finished'})
     cls.bases = []
     cls.keywords = []
     cls.body = [n for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -37,6 +38,7 @@ def load_flow_methods():
         "asyncio": SimpleNamespace(sleep=AsyncMock()),
         "_QR_POLL_SECONDS": 2,
         "_write_qr_svg": Mock(return_value="/local/mosru_water_qr.svg?t=123"),
+        "_delete_qr_svg": Mock(),
     }
     exec(compile(ast.fix_missing_locations(module), str(SOURCE), "exec"), namespace)
     return namespace["MosRuWaterConfigFlow"], namespace
