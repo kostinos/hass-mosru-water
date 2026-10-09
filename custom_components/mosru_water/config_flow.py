@@ -18,7 +18,10 @@ from homeassistant.components.persistent_notification import (
     async_dismiss as pn_dismiss,
 )
 
-from .api import MosRuAuthError, MosRuApiError, MosRuClient
+from .api import (
+    MosRuAuthError, MosRuApiError, MosRuClient,
+    COLD_TYPE, HOT_TYPE, counters_of_type, pick_counters, place_label,
+)
 from .const import (
     DOMAIN,
     CONF_PAYCODE, CONF_FLAT, CONF_USER_PLACE_ID,
@@ -75,33 +78,25 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._data: dict[str, Any] = {}
         self._counters: list[dict] = []
         self._counters_fetched: bool = False
+        self._places: list[dict] | None = None
+        self._suggested_counters: tuple[str | None, str | None] = (None, None)
         self._client: MosRuClient | None = None
         self._qr_task: asyncio.Task | None = None
         self._qr_url: str = ""
         self._qr_link: str = ""
         self._reauth_entry: config_entries.ConfigEntry | None = None
 
-    # ── Шаг 1: код плательщика и квартира ────────────────────────────────
+    # ── Шаг 1: старт — сразу вход, реквизиты не спрашиваем ───────────────
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Ввод кода плательщика и номера квартиры."""
+        """Начать настройку: квартира выбирается из профиля после входа."""
         if self._async_current_entries():
             return self.async_abort(reason="already_configured")
 
-        if user_input is not None:
-            self._data.update(user_input)
-            self._client = MosRuClient()
-            return await self.async_step_qr()
-
-        return self.async_show_form(
-            step_id="user",
-            data_schema=vol.Schema({
-                vol.Required(CONF_PAYCODE): str,
-                vol.Required(CONF_FLAT):    str,
-            }),
-        )
+        self._client = MosRuClient()
+        return await self.async_step_qr()
 
     # ── Шаг 2: QR-авторизация ────────────────────────────────────────────
 
@@ -146,6 +141,22 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         self._qr_task = None
 
+        if result == "login_incomplete":
+            return self.async_abort(reason="login_incomplete")
+
+        if result == "totp_required":
+            pn_create(
+                self.hass,
+                message=(
+                    "Вход подтверждён, mos.ru просит код из приложения-аутентификатора. "
+                    "Введите его в Home Assistant.\n\n"
+                    f"[Продолжить авторизацию]({_AUTH_SETTINGS_URL})"
+                ),
+                title="MOS.RU Water: Подтверждение входа",
+                notification_id="mosru_water_qr",
+            )
+            return self.async_show_progress_done(next_step_id="totp")
+
         if result == "code_required":
             pn_create(
                 self.hass,
@@ -178,7 +189,7 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 data_updates={CONF_SESSION_COOKIES: cookies},
             )
 
-        return self.async_show_progress_done(next_step_id="discover")
+        return self.async_show_progress_done(next_step_id="place")
 
     def _notify_qr_auth(self) -> None:
         """Показать актуальную ссылку подтверждения той же сессии, что в QR."""
@@ -210,10 +221,16 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     status = await self.hass.async_add_executor_job(
                         self._client.complete_qr_auth
                     )
-                except (MosRuAuthError, MosRuApiError):
+                except MosRuAuthError as err:
+                    # Новый QR тут не поможет: mos.ru ждёт шаг, который мы не умеем.
+                    _LOGGER.error("QR-вход не завершён: %s", err)
+                    return "login_incomplete"
+                except MosRuApiError:
                     return False
                 if status == "sms_required":
                     return "code_required"
+                if status == "totp_required":
+                    return "totp_required"
                 return True
 
             if command == "askForConfirm":
@@ -247,14 +264,27 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Ввод 6-значного кода из пуш-уведомления (2FA)."""
+        return await self._async_submit_code(
+            "code", self._client.submit_sms_and_trust, user_input
+        )
+
+    async def async_step_totp(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Ввод кода из приложения-аутентификатора (2FA)."""
+        return await self._async_submit_code(
+            "totp", self._client.submit_totp, user_input
+        )
+
+    async def _async_submit_code(
+        self, step_id: str, submit, user_input: dict[str, Any] | None
+    ) -> FlowResult:
         errors: dict[str, str] = {}
 
         if user_input is not None:
             code = user_input.get("sms_code", "").strip()
             try:
-                await self.hass.async_add_executor_job(
-                    self._client.submit_sms_and_trust, code
-                )
+                await self.hass.async_add_executor_job(submit, code)
             except MosRuAuthError:
                 errors["sms_code"] = "invalid_code"
             except MosRuApiError:
@@ -273,10 +303,10 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         data_updates={CONF_SESSION_COOKIES: cookies},
                     )
 
-                return await self.async_step_discover()
+                return await self.async_step_place()
 
         return self.async_show_form(
-            step_id="code",
+            step_id=step_id,
             data_schema=vol.Schema({
                 vol.Required("sms_code"): selector.TextSelector(
                     selector.TextSelectorConfig(
@@ -287,61 +317,125 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    # ── Шаг 4: выбор счётчиков ───────────────────────────────────────────
+    # ── Шаг 4: выбор квартиры ────────────────────────────────────────────
 
-    def _discover_counters(self) -> list[dict]:
-        """Войти в ed.mos.ru, определить userPlaceId и получить счётчики.
-
-        Синхронный метод для executor. userPlaceId запоминается в конфиге: это
-        идентификатор квартиры в ed.mos.ru, по нему идут все дальнейшие запросы.
-        """
+    def _load_places(self) -> list[dict]:
+        """Войти в ed.mos.ru и получить квартиры профиля (синхронно, в executor)."""
         self._client.authorize_ed()
-        user_place_id = self._client.find_user_place_id(
-            self._data[CONF_PAYCODE], self._data.get(CONF_FLAT, "")
+        return self._client.list_places()
+
+    async def async_step_place(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Выбор квартиры из профиля «Электронного дома»."""
+        if user_input and self._places:
+            chosen = {p["user_place_id"]: p for p in self._places}.get(
+                user_input.get(CONF_USER_PLACE_ID)
+            )
+            if chosen is not None:
+                return await self._async_select_place(chosen)
+
+        if self._places is None:
+            try:
+                self._places = await self.hass.async_add_executor_job(self._load_places)
+            except MosRuAuthError:
+                return self.async_abort(reason="session_expired")
+            except MosRuApiError as err:
+                # Форма без полей: «Отправить» повторяет запрос.
+                _LOGGER.error("Не удалось получить список квартир: %s", err)
+                return self.async_show_form(
+                    step_id="place",
+                    data_schema=vol.Schema({}),
+                    errors={"base": "cannot_get_places"},
+                    description_placeholders={"error": str(err)},
+                )
+
+        if not self._places:
+            return self.async_abort(reason="no_places")
+        if len(self._places) == 1:
+            return await self._async_select_place(self._places[0])
+
+        return self.async_show_form(
+            step_id="place",
+            data_schema=vol.Schema({
+                vol.Required(CONF_USER_PLACE_ID): selector.SelectSelector(
+                    selector.SelectSelectorConfig(options=[
+                        selector.SelectOptionDict(
+                            value=p["user_place_id"], label=place_label(p)
+                        )
+                        for p in self._places
+                    ])
+                ),
+            }),
         )
-        self._data[CONF_USER_PLACE_ID] = user_place_id
-        return self._client.get_counters(user_place_id)
+
+    async def _async_select_place(self, place: dict) -> FlowResult:
+        """Запомнить квартиру: по userPlaceId идут все запросы к ed.mos.ru,
+        paycode и flat нужны имени устройства и повторному поиску после выхода."""
+        self._data[CONF_USER_PLACE_ID] = place["user_place_id"]
+        self._data[CONF_PAYCODE] = place["paycode"]
+        self._data[CONF_FLAT] = place["flat"]
+        return await self.async_step_discover()
+
+    # ── Шаг 5: выбор счётчиков ───────────────────────────────────────────
 
     async def async_step_discover(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Выбор счётчиков: автоматически из API или ручной ввод ID."""
+        """Выбор счётчиков: автоматически по типу ХВС/ГВС, из списка или вручную."""
         errors: dict[str, str] = {}
 
-        # Однократно авторизуемся в ed.mos.ru и запрашиваем список счётчиков
+        # Однократно запрашиваем счётчики выбранной квартиры
         if not self._counters_fetched:
             self._counters_fetched = True
             try:
                 self._counters = await self.hass.async_add_executor_job(
-                    self._discover_counters
+                    self._client.get_counters, self._data[CONF_USER_PLACE_ID]
                 )
             except MosRuAuthError:
                 return self.async_abort(reason="session_expired")
             except MosRuApiError:
                 self._counters = []  # падаем в ручной ввод
+            self._suggested_counters = pick_counters(self._counters)
+            cold_id, hot_id = self._suggested_counters
+            if cold_id and hot_id:
+                # Обычная квартира: один ХВС и один ГВС — спрашивать нечего.
+                self._data[CONF_COLD_ID] = cold_id
+                self._data[CONF_HOT_ID] = hot_id
+                return await self.async_step_sensors()
 
-        # ── Счётчики найдены автоматически ───────────────────────────────
+        # ── Счётчики найдены, но выбор неоднозначен ──────────────────────
         if self._counters:
-            counter_options = [
-                selector.SelectOptionDict(
-                    value=c["id"],
-                    label=f"{c['name']} ({c['type']}, ID: {c['id']})",
-                )
-                for c in self._counters
-            ]
             if user_input is not None:
                 self._data[CONF_COLD_ID] = user_input[CONF_COLD_ID]
                 self._data[CONF_HOT_ID]  = user_input[CONF_HOT_ID]
                 return await self.async_step_sensors()
 
+            def options(type_name: str) -> list:
+                return [
+                    selector.SelectOptionDict(
+                        value=c["id"],
+                        label=f"{c['name']} ({c['type']}, ID: {c['id']})",
+                    )
+                    for c in counters_of_type(self._counters, type_name)
+                ]
+
+            def required(key: str, suggested: str | None):
+                # Пустой suggested_value (None) старые фронтенды HA подставляют
+                # в поле как значение, поэтому передаём его только когда он есть.
+                if suggested:
+                    return vol.Required(key, description={"suggested_value": suggested})
+                return vol.Required(key)
+
+            cold_id, hot_id = self._suggested_counters
             return self.async_show_form(
                 step_id="discover",
                 data_schema=vol.Schema({
-                    vol.Required(CONF_COLD_ID): selector.SelectSelector(
-                        selector.SelectSelectorConfig(options=counter_options)
+                    required(CONF_COLD_ID, cold_id): selector.SelectSelector(
+                        selector.SelectSelectorConfig(options=options(COLD_TYPE))
                     ),
-                    vol.Required(CONF_HOT_ID): selector.SelectSelector(
-                        selector.SelectSelectorConfig(options=counter_options)
+                    required(CONF_HOT_ID, hot_id): selector.SelectSelector(
+                        selector.SelectSelectorConfig(options=options(HOT_TYPE))
                     ),
                 }),
                 description_placeholders={
@@ -388,7 +482,7 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    # ── Шаг 5: HA-сенсоры ────────────────────────────────────────────────
+    # ── Шаг 6: HA-сенсоры ────────────────────────────────────────────────
 
     async def async_step_sensors(
         self, user_input: dict[str, Any] | None = None
