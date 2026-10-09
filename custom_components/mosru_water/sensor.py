@@ -83,6 +83,10 @@ class MosRuWaterStatusSensor(CoordinatorEntity[MosRuWaterCoordinator], SensorEnt
     def native_value(self) -> str:
         return (self.coordinator.data or {}).get("last_status", "pending")
 
+    @property
+    def extra_state_attributes(self) -> dict:
+        return {'operations': (self.coordinator.data or {}).get('operation_results', {})}
+
 
 class MosRuWaterDateSensor(CoordinatorEntity[MosRuWaterCoordinator], SensorEntity):
     """Дата и время последней отправки."""
