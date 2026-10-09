@@ -300,6 +300,124 @@ class FindUserPlaceIdTest(unittest.TestCase):
             self.client.find_user_place_id("0000000101", "12")
 
 
+# Ответ getInfo с полями, которые нужны для выбора квартиры (ключи — из живого ответа).
+_PLACES_PAYLOAD = {
+    "data": {
+        "addresses": [
+            {"userPlaceId": 3395115, "fls": "1344364128", "flat": "46",
+             "addressCaption": "ул. Тестовая, д. 1", "caption": "Дом"},
+            {"userPlaceId": 999001, "fls": "1111111111", "flat": 5, "caption": "Дача"},
+            # повтор той же квартиры
+            {"userPlaceId": 3395115, "fls": "1344364128", "flat": "46"},
+            # без userPlaceId — адресовать нельзя
+            {"fls": "2222222222", "flat": "7"},
+            {"userPlaceId": 777, "fls": None, "flat": None},
+            "garbage",
+        ],
+    }
+}
+
+
+class ListPlacesTest(unittest.TestCase):
+    def setUp(self):
+        self.client = MosRuClient()
+        self.session = mock.Mock()
+        self.client._session = self.session
+        self.session.request.return_value = FakeResponse(200, _PLACES_PAYLOAD)
+
+    def test_requests_profile(self):
+        self.client.list_places()
+        method, url = self.session.request.call_args[0]
+        self.assertEqual(method, "GET")
+        self.assertTrue(url.endswith("/profile/user/getInfo/"))
+
+    def test_normalizes_and_deduplicates(self):
+        self.assertEqual(self.client.list_places(), [
+            {"user_place_id": "3395115", "paycode": "1344364128", "flat": "46",
+             "address": "ул. Тестовая, д. 1"},
+            {"user_place_id": "999001", "paycode": "1111111111", "flat": "5",
+             "address": "Дача"},
+            {"user_place_id": "777", "paycode": "", "flat": "", "address": ""},
+        ])
+
+    def test_empty_profile(self):
+        self.session.request.return_value = FakeResponse(200, {"data": {}})
+        self.assertEqual(self.client.list_places(), [])
+
+
+_COLD = {"id": "1", "name": "TEST-COLD-001", "type": "ХВС"}
+_HOT = {"id": "2", "name": "TEST-HOT-001", "type": "ГВС"}
+
+
+class PickCountersTest(unittest.TestCase):
+    def test_one_cold_one_hot(self):
+        self.assertEqual(api.pick_counters([_HOT, _COLD]), ("1", "2"))
+
+    def test_two_cold_meters_are_ambiguous(self):
+        cold2 = {"id": "3", "name": "x", "type": "ХВС"}
+        self.assertEqual(api.pick_counters([_COLD, cold2, _HOT]), (None, "2"))
+
+    def test_unknown_types(self):
+        self.assertEqual(
+            api.pick_counters([{"id": "5", "name": "x", "type": ""},
+                               {"id": "6", "name": "y", "type": "ЭЛ"}]),
+            (None, None),
+        )
+
+    def test_empty(self):
+        self.assertEqual(api.pick_counters([]), (None, None))
+
+    def test_type_case_and_spaces(self):
+        self.assertEqual(
+            api.pick_counters([{"id": "1", "name": "a", "type": " хвс "},
+                               {"id": "2", "name": "b", "type": "гвс"}]),
+            ("1", "2"),
+        )
+
+
+class CountersOfTypeTest(unittest.TestCase):
+    def test_filters_by_type(self):
+        self.assertEqual(api.counters_of_type([_COLD, _HOT], api.COLD_TYPE), [_COLD])
+
+    def test_falls_back_to_all_when_type_missing(self):
+        other = {"id": "9", "name": "z", "type": ""}
+        self.assertEqual(api.counters_of_type([other], api.HOT_TYPE), [other])
+
+    def test_type_argument_is_normalized(self):
+        spaced = {"id": "2", "name": "b", "type": " гвс "}
+        self.assertEqual(api.counters_of_type([_COLD, spaced], api.HOT_TYPE), [spaced])
+        self.assertEqual(api.counters_of_type([_COLD, spaced], " гвс "), [spaced])
+
+
+class PlaceLabelTest(unittest.TestCase):
+    def test_full(self):
+        self.assertEqual(
+            api.place_label({"user_place_id": "1", "paycode": "1344364128",
+                             "flat": "46", "address": "ул. Тестовая, д. 1"}),
+            "ул. Тестовая, д. 1, кв. 46 — ЕПД 1344364128",
+        )
+
+    def test_without_address(self):
+        self.assertEqual(
+            api.place_label({"user_place_id": "1", "paycode": "1344364128",
+                             "flat": "46", "address": ""}),
+            "кв. 46 — ЕПД 1344364128",
+        )
+
+    def test_paycode_only(self):
+        self.assertEqual(
+            api.place_label({"user_place_id": "1", "paycode": "1344364128",
+                             "flat": "", "address": ""}),
+            "ЕПД 1344364128",
+        )
+
+    def test_only_id(self):
+        self.assertEqual(
+            api.place_label({"user_place_id": "777", "paycode": "", "flat": "", "address": ""}),
+            "777",
+        )
+
+
 class AuthorizeEdTest(unittest.TestCase):
     """OAuth ed.mos.ru: code из финального URL меняется на сессию."""
 
@@ -358,6 +476,108 @@ class SessionNetworkTest(unittest.TestCase):
             url="https://ed.mos.ru/security/callback/sudir/login?code=test")
         self.session.post.return_value = FakeResponse(503, {})
         with self.assertRaises(MosRuTemporaryError): self.client.authorize_ed()
+
+
+_TOTP_URL = "https://login.mos.ru/sps/login/methods2/totp?bo=%2Fsps%2Foauth%2Fae"
+_TRUST_URL = "https://login.mos.ru/sps/login/ur/askToTrust?bo=%2Fsps%2Foauth%2Fae"
+_SATISFY_URL = "https://www.mos.ru/api/acs/v1/login/satisfy?code=test"
+
+
+def _page(status: int, url: str, *, location: str | None = None, text: str = ""):
+    """Ответ login.mos.ru: для редиректов — Location, для страниц — HTML."""
+    return mock.Mock(
+        status_code=status, url=url, text=text, history=[],
+        headers={"Location": location} if location else {},
+    )
+
+
+class QrSecondFactorTest(unittest.TestCase):
+    """После сканирования QR mos.ru может запросить второй фактор.
+
+    Цепочка из реального входа аккаунта с приложением-аутентификатором:
+    POST qrCode/complete → 303 → /sps/login/methods2/totp. Пока код не введён,
+    SSO-сессии нет, и вход в ed.mos.ru уходит на форму пароля.
+    """
+
+    def setUp(self):
+        self.client = MosRuClient()
+        self.session = mock.Mock()
+        self.session.cookies = []
+        self.client._session = self.session
+
+    def test_totp_page_requires_code(self):
+        self.session.post.return_value = _page(200, _TOTP_URL)
+        self.assertEqual(self.client.complete_qr_auth(), "totp_required")
+
+    def test_leaving_login_host_is_done(self):
+        self.session.post.return_value = _page(200, "https://www.mos.ru/")
+        self.assertEqual(self.client.complete_qr_auth(), "done")
+
+    def test_unknown_login_step_is_not_reported_as_done(self):
+        # Раньше любой неизвестный шаг считался успехом, а ошибка всплывала
+        # позже как «сессия истекла».
+        self.session.post.return_value = _page(
+            200, "https://login.mos.ru/sps/login/methods/password?bo=%2Fsps")
+        with self.assertRaises(MosRuAuthError) as ctx:
+            self.client.complete_qr_auth()
+        self.assertIn("/sps/login/methods/password", str(ctx.exception))
+
+    def _start_totp(self):
+        self.session.post.return_value = _page(200, _TOTP_URL)
+        self.client.complete_qr_auth()
+        self.session.reset_mock()
+
+    def test_totp_code_is_posted_to_totp_page(self):
+        self._start_totp()
+        self.session.post.return_value = _page(303, _TOTP_URL, location=_SATISFY_URL)
+        self.session.get.side_effect = [
+            _page(302, _SATISFY_URL, location="https://www.mos.ru/"),
+            _page(200, "https://www.mos.ru/"),
+        ]
+
+        self.client.submit_totp("123456")
+
+        args, kwargs = self.session.post.call_args
+        self.assertEqual(args[0], _TOTP_URL)
+        self.assertEqual(kwargs["data"], {"otp": "123456"})
+        self.assertFalse(kwargs["allow_redirects"])
+        # satisfy требует навигационных заголовков, как у браузера.
+        first_hop = self.session.get.call_args_list[0]
+        self.assertEqual(first_hop.args[0], _SATISFY_URL)
+        self.assertEqual(first_hop.kwargs["headers"]["Sec-Fetch-Mode"], "navigate")
+
+    def test_wrong_totp_code_stays_on_totp_page(self):
+        self._start_totp()
+        self.session.post.return_value = _page(200, _TOTP_URL)
+        with self.assertRaises(MosRuAuthError):
+            self.client.submit_totp("000000")
+
+    def test_totp_then_trust_device(self):
+        self._start_totp()
+        trust_form = (
+            '<form action="/sps/login/ur/askToTrust?bo=%2Fsps" method="post">'
+            '<input type="hidden" name="csrf" value="tok"></form>'
+        )
+        self.session.post.side_effect = [
+            _page(303, _TOTP_URL, location=_TRUST_URL),
+            _page(302, _TRUST_URL, location="https://www.mos.ru/"),
+        ]
+        self.session.get.side_effect = [
+            _page(200, _TRUST_URL, text=trust_form),
+            _page(200, "https://www.mos.ru/"),
+        ]
+        self.session.cookies = [mock.Mock(name="cookie")]
+        self.session.cookies[0].name = "Ltpatoken2"
+
+        self.client.submit_totp("123456")
+
+        trust_call = self.session.post.call_args_list[1]
+        self.assertEqual(trust_call.kwargs["data"], {"csrf": "tok", "action": "trust"})
+
+    def test_totp_without_pending_login_fails(self):
+        with self.assertRaises(MosRuAuthError):
+            self.client.submit_totp("123456")
+        self.session.post.assert_not_called()
 
 
 if __name__ == "__main__":

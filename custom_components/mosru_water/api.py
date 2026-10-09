@@ -26,6 +26,7 @@ _QR_REFRESH_URL    = "https://login.mos.ru/sps/login/methods/headless/qrCode/ref
 _QR_COMPLETE_URL   = "https://login.mos.ru/sps/login/methods/qrCode/complete"
 _QR_ASKTOTRUST_URL = "https://login.mos.ru/sps/login/ur/askToTrust"
 _SMS_URL           = "https://login.mos.ru/sps/login/methods/sms"
+_TOTP_PATH         = "/sps/login/methods2/totp"
 _SERVICE_PAGE_URL  = "https://www.mos.ru/services/pokazaniya-vodi-i-tepla/new/"
 
 # ed.mos.ru (Электронный дом) — рабочий API показаний. Прежний
@@ -165,6 +166,56 @@ def _parse_form(html: str) -> tuple[str, dict]:
         if name_m:
             hidden[name_m.group(1)] = value_m.group(1) if value_m else ""
     return action, hidden
+
+
+# Тип счётчика в ответе ed.mos.ru (поле typeName).
+COLD_TYPE = "ХВС"
+HOT_TYPE  = "ГВС"
+
+
+def _counter_type(counter: dict) -> str:
+    return str(counter.get("type") or "").strip().upper()
+
+
+def counters_of_type(counters: list[dict], type_name: str) -> list[dict]:
+    """Счётчики заданного типа; если таких нет — все, чтобы было из чего выбрать."""
+    wanted = type_name.strip().upper()
+    matched = [c for c in counters if _counter_type(c) == wanted]
+    return matched or list(counters)
+
+
+def pick_counters(counters: list[dict]) -> tuple[str | None, str | None]:
+    """(cold_id, hot_id): единственный счётчик ХВС и единственный ГВС, иначе None."""
+    def single(type_name: str) -> str | None:
+        ids = [c["id"] for c in counters if _counter_type(c) == type_name]
+        return ids[0] if len(ids) == 1 else None
+
+    return single(COLD_TYPE), single(HOT_TYPE)
+
+
+def place_label(place: dict) -> str:
+    """Подпись квартиры в списке: «адрес, кв. N — ЕПД код»."""
+    label = ", ".join(
+        part for part in (
+            place.get("address") or "",
+            f"кв. {place['flat']}" if place.get("flat") else "",
+        ) if part
+    )
+    if place.get("paycode"):
+        label = f"{label} — ЕПД {place['paycode']}" if label else f"ЕПД {place['paycode']}"
+    return label or place["user_place_id"]
+
+
+def _unfinished_login_step(url: str) -> str | None:
+    """Путь шага входа, если цепочка остановилась на login.mos.ru, иначе None.
+
+    Успешный вход уходит с login.mos.ru на satisfy портала. Страница
+    /sps/login/... означает, что mos.ru ждёт ещё одно действие пользователя.
+    """
+    parts = urllib.parse.urlsplit(url)
+    if parts.netloc == "login.mos.ru" and parts.path.startswith("/sps/login/"):
+        return parts.path
+    return None
 
 
 class MosRuAuthError(Exception):
@@ -342,7 +393,11 @@ class MosRuClient:
     def complete_qr_auth(self) -> str:
         """Завершить QR-авторизацию: POST qrCode/complete.
 
-        Returns: 'done' | 'sms_required'
+        Returns: 'done' | 'sms_required' | 'totp_required'
+
+        Raises:
+            MosRuAuthError: вход остановился на неизвестном шаге login.mos.ru —
+                SSO-сессии нет, считать вход успешным нельзя.
         """
         try:
             resp = self._session.post(
@@ -360,7 +415,55 @@ class MosRuClient:
             self._sms_page_url = resp.url
             self._sms_form_action, self._sms_hidden = _parse_form(resp.text)
             return "sms_required"
+        # Аккаунт защищён приложением-аутентификатором: QR подтверждает только
+        # первый фактор, SSO-сессия появится после ввода TOTP-кода.
+        if urllib.parse.urlsplit(resp.url).path == _TOTP_PATH:
+            self._totp_page_url = resp.url
+            return "totp_required"
+        if "askToTrust" in resp.url:
+            self._trust_device(resp)
+            return "done"
+        step = _unfinished_login_step(resp.url)
+        if step:
+            raise MosRuAuthError(f"Вход не завершён: mos.ru запросил шаг {step}")
         return "done"
+
+    def submit_totp(self, code: str) -> None:
+        """Отправить код из приложения-аутентификатора после QR-входа."""
+        page_url = getattr(self, "_totp_page_url", "")
+        if not page_url:
+            raise MosRuAuthError("Нет незавершённого входа с TOTP-кодом")
+        try:
+            resp = self._session.post(
+                page_url,
+                data={"otp": code},
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Referer": page_url,
+                    "Origin": "https://login.mos.ru",
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "same-origin",
+                    "Sec-Fetch-User": "?1",
+                },
+                allow_redirects=False,
+                timeout=_TIMEOUT,
+            )
+        except requests.RequestException as err:
+            raise MosRuApiError("Сетевая ошибка mos.ru") from err
+        resp = self._follow_redirects(resp)
+
+        if urllib.parse.urlsplit(resp.url).path == _TOTP_PATH:
+            raise MosRuAuthError("Неверный код из приложения-аутентификатора")
+        if "askToTrust" in resp.url:
+            self._trust_device(resp)
+            return
+        if resp.status_code >= 400:
+            raise MosRuAuthError(f"Ошибка входа после TOTP-кода: HTTP {resp.status_code}")
+        step = _unfinished_login_step(resp.url)
+        if step:
+            raise MosRuAuthError(f"Вход не завершён: mos.ru запросил шаг {step}")
+        self._totp_page_url = ""
 
     def submit_sms_and_trust(self, code: str) -> None:
         """Отправить 6-значный код SMS/пуша и довериться устройству."""
@@ -396,66 +499,74 @@ class MosRuClient:
 
         # Если попали на askToTrust — доверяемся устройству
         if "askToTrust" in resp.url:
-            trust_page_url = resp.url
-            trust_form_action, trust_hidden = _parse_form(resp.text)
-            if trust_form_action.startswith("http"):
-                trust_url = trust_form_action
-            elif trust_form_action.startswith("/"):
-                trust_url = f"https://login.mos.ru{trust_form_action}"
-            else:
-                trust_url = trust_page_url or _QR_ASKTOTRUST_URL
+            self._trust_device(resp)
 
-            trust_data = {**trust_hidden, "action": "trust"}
+    def _trust_device(self, resp: requests.Response) -> None:
+        """Ответить «доверять устройству» на странице askToTrust."""
+        trust_page_url = resp.url
+        trust_form_action, trust_hidden = _parse_form(resp.text)
+        if trust_form_action.startswith("http"):
+            trust_url = trust_form_action
+        elif trust_form_action.startswith("/"):
+            trust_url = f"https://login.mos.ru{trust_form_action}"
+        else:
+            trust_url = trust_page_url or _QR_ASKTOTRUST_URL
+
+        trust_data = {**trust_hidden, "action": "trust"}
+        try:
+            resp2 = self._session.post(
+                trust_url,
+                data=trust_data,
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Referer": trust_page_url,
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "same-origin",
+                    "Sec-Fetch-User": "?1",
+                },
+                allow_redirects=False,
+                timeout=_TIMEOUT,
+            )
+        except requests.RequestException as err:
+            raise MosRuApiError("Сетевая ошибка mos.ru") from err
+
+        resp2 = self._follow_redirects(resp2)
+
+        if resp2.status_code >= 400 and resp2.status_code < 500:
+            raise MosRuAuthError("Ошибка доверия устройству")
+        cookie_names = {c.name for c in self._session.cookies}
+        if "Ltpatoken2" not in cookie_names:
+            raise MosRuAuthError("Авторизация не завершена: Ltpatoken2 не установлен")
+
+    def _follow_redirects(self, resp: requests.Response) -> requests.Response:
+        """Пройти редиректы вручную, как браузерная навигация."""
+        for _ in range(15):
+            loc = resp.headers.get("Location", "")
+            if resp.status_code not in (301, 302, 303, 307, 308) or not loc:
+                break
+            if not loc.startswith("http"):
+                loc = urllib.parse.urljoin(resp.url, loc)
+            # satisfy требует sec-fetch-* заголовки как у браузерной навигации
+            req_headers: dict[str, str] = {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Referer": resp.url,
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "same-site",
+                "Sec-Fetch-User": "?1",
+                "Upgrade-Insecure-Requests": "1",
+            }
             try:
-                resp2 = self._session.post(
-                    trust_url,
-                    data=trust_data,
-                    headers={
-                        "Content-Type": "application/x-www-form-urlencoded",
-                        "Referer": trust_page_url,
-                        "Sec-Fetch-Dest": "document",
-                        "Sec-Fetch-Mode": "navigate",
-                        "Sec-Fetch-Site": "same-origin",
-                        "Sec-Fetch-User": "?1",
-                    },
+                resp = self._session.get(
+                    loc,
+                    headers=req_headers,
                     allow_redirects=False,
                     timeout=_TIMEOUT,
                 )
             except requests.RequestException as err:
                 raise MosRuApiError("Сетевая ошибка mos.ru") from err
-
-            # Следуем редиректам вручную
-            for step in range(15):
-                loc = resp2.headers.get("Location", "")
-                if resp2.status_code not in (301, 302, 303, 307, 308) or not loc:
-                    break
-                if not loc.startswith("http"):
-                    loc = urllib.parse.urljoin(resp2.url, loc)
-                # satisfy требует sec-fetch-* заголовки как у браузерной навигации
-                req_headers: dict[str, str] = {
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Referer": resp2.url,
-                    "Sec-Fetch-Dest": "document",
-                    "Sec-Fetch-Mode": "navigate",
-                    "Sec-Fetch-Site": "same-site",
-                    "Sec-Fetch-User": "?1",
-                    "Upgrade-Insecure-Requests": "1",
-                }
-                try:
-                    resp2 = self._session.get(
-                        loc,
-                        headers=req_headers,
-                        allow_redirects=False,
-                        timeout=_TIMEOUT,
-                    )
-                except requests.RequestException as err:
-                    raise MosRuApiError("Сетевая ошибка mos.ru") from err
-
-            if resp2.status_code >= 400 and resp2.status_code < 500:
-                raise MosRuAuthError("Ошибка доверия устройству")
-            cookie_names = {c.name for c in self._session.cookies}
-            if "Ltpatoken2" not in cookie_names:
-                raise MosRuAuthError("Авторизация не завершена: Ltpatoken2 не установлен")
+        return resp
 
     def try_refresh_acst(self) -> bool:
         """Обновить acst через официальный ACS probe endpoint.
@@ -624,12 +735,13 @@ class MosRuClient:
             raise MosRuApiError(f"Неожиданный ответ: {repr(data)[:200]}")
         return places
 
-    def find_user_place_id(self, paycode: str, flat: str) -> str:
-        """Определить userPlaceId по коду плательщика — для мастера настройки.
+    def list_places(self) -> list[dict]:
+        """Квартиры из профиля ed.mos.ru — для выбора в мастере настройки.
 
-        ed.mos.ru адресует квартиру своим userPlaceId, а не paycode. Профиль
-        пользователя перечисляет квартиры в data.addresses; в каждой записи есть
-        fls (это и есть код плательщика), flat и userPlaceId.
+        Профиль перечисляет квартиры в data.addresses: fls (код плательщика),
+        flat, userPlaceId и готовая строка адреса дома addressCaption.
+
+        Returns: [{user_place_id, paycode, flat, address}] — все значения строки.
         """
         data = self._request_json(
             "GET",
@@ -637,18 +749,39 @@ class MosRuClient:
             headers=_XHR_HEADERS,
             retries=_RETRY_ATTEMPTS,
         )
-        addresses = (data.get("data") or {}).get("addresses") or []
-        for place in addresses:
-            if not isinstance(place, dict):
+        result: list[dict] = []
+        seen: set[str] = set()
+        for place in (data.get("data") or {}).get("addresses") or []:
+            if not isinstance(place, dict) or not place.get("userPlaceId"):
                 continue
-            # flat в ответе — число, paycode тоже: сравниваем как строки
-            if str(place.get("fls") or "") != str(paycode):
+            user_place_id = str(place["userPlaceId"])
+            if user_place_id in seen:
                 continue
-            if flat and str(place.get("flat") or "") != str(flat):
+            seen.add(user_place_id)
+            result.append({
+                "user_place_id": user_place_id,
+                # flat и fls приходят то строкой, то числом
+                "paycode": str(place.get("fls") or ""),
+                "flat": str(place.get("flat") or ""),
+                # caption — запасной вариант: это может быть собственное название
+                # квартиры у пользователя (например, «Дача»), а не адрес
+                "address": str(place.get("addressCaption") or place.get("caption") or ""),
+            })
+        return result
+
+    def find_user_place_id(self, paycode: str, flat: str) -> str:
+        """Определить userPlaceId по коду плательщика и номеру квартиры.
+
+        ed.mos.ru адресует квартиру своим userPlaceId, а не paycode. Нужен
+        координатору: после «Выйти и войти заново» userPlaceId ищется заново
+        по сохранённым реквизитам.
+        """
+        for place in self.list_places():
+            if place["paycode"] != str(paycode):
                 continue
-            upid = place.get("userPlaceId")
-            if upid:
-                return str(upid)
+            if flat and place["flat"] != str(flat):
+                continue
+            return place["user_place_id"]
         raise MosRuApiError(
             f"В профиле ed.mos.ru не найдена квартира с кодом плательщика {paycode}"
         )
