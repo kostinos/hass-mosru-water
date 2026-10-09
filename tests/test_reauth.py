@@ -18,7 +18,7 @@ def load_flow_methods():
     tree = ast.parse(SOURCE.read_text())
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef))
     names = {"__init__", "async_step_reauth", "_notify_qr_auth", "_poll_qr_scan",
-             "async_step_qr", "async_step_code"}
+             "async_step_qr", "async_step_code", "async_step_totp", "_async_submit_code"}
     cls.bases = []
     cls.keywords = []
     cls.body = [n for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -27,7 +27,9 @@ def load_flow_methods():
         ast.alias(name="annotations")], level=0), cls], type_ignores=[])
     namespace = {
         "_AUTH_SETTINGS_URL": "/config/integrations/integration/mosru_water",
-        "vol": SimpleNamespace(Schema=lambda value: value),
+        "vol": SimpleNamespace(Schema=lambda value: value, Required=lambda key: key),
+        "selector": Mock(),
+        "_LOGGER": Mock(),
         "MosRuClient": Mock(),
         "CONF_SESSION_COOKIES": "session_cookies",
         "MosRuAuthError": type("MosRuAuthError", (Exception,), {}),
@@ -133,3 +135,61 @@ class ReauthTest(unittest.IsolatedAsyncioTestCase):
             self.flow.hass, notification_id="mosru_water_qr")
         self.flow.async_update_reload_and_abort.assert_called_once_with(
             self.entry, data_updates={"session_cookies": {"new": "cookie"}})
+
+
+class TotpFlowTest(unittest.IsolatedAsyncioTestCase):
+    """Аккаунт с приложением-аутентификатором: после QR нужен TOTP-код."""
+
+    setUp = ReauthTest.setUp
+
+    async def test_poll_reports_totp(self):
+        self.flow._client = Mock()
+        self.flow._client.poll_qr.return_value = "needComplete"
+        self.flow._client.complete_qr_auth.return_value = "totp_required"
+        self.assertEqual(await self.flow._poll_qr_scan(), "totp_required")
+
+    async def test_qr_continues_to_totp_step(self):
+        self.flow._qr_task = asyncio.get_running_loop().create_future()
+        self.flow._qr_task.set_result("totp_required")
+        self.flow.async_show_progress_done = Mock()
+        await self.flow.async_step_qr()
+        self.flow.async_show_progress_done.assert_called_once_with(next_step_id="totp")
+        message = self.ns["pn_create"].call_args.kwargs["message"]
+        self.assertIn("аутентификатор", message)
+        self.assertIn("(/config/integrations/integration/mosru_water)", message)
+
+    async def test_totp_success_updates_and_reloads_existing_entry(self):
+        self.flow._reauth_entry = self.entry
+        self.flow._client = Mock()
+        self.flow._client.get_session_cookies.return_value = {"new": "cookie"}
+        await self.flow.async_step_totp({"sms_code": " 123456 "})
+        self.flow._client.submit_totp.assert_called_once_with("123456")
+        self.flow._client.submit_sms_and_trust.assert_not_called()
+        self.flow.async_update_reload_and_abort.assert_called_once_with(
+            self.entry, data_updates={"session_cookies": {"new": "cookie"}})
+
+    async def test_wrong_totp_code_asks_again(self):
+        self.flow._client = Mock()
+        self.flow._client.submit_totp.side_effect = self.ns["MosRuAuthError"]()
+        await self.flow.async_step_totp({"sms_code": "000000"})
+        kwargs = self.flow.async_show_form.call_args.kwargs
+        self.assertEqual(kwargs["step_id"], "totp")
+        self.assertEqual(kwargs["errors"], {"sms_code": "invalid_code"})
+
+    async def test_unfinished_login_aborts_instead_of_new_qr(self):
+        self.flow._client = Mock()
+        self.flow._client.poll_qr.return_value = "needComplete"
+        self.flow._client.complete_qr_auth.side_effect = self.ns["MosRuAuthError"]()
+        self.assertEqual(await self.flow._poll_qr_scan(), "login_incomplete")
+
+        self.flow._qr_task = asyncio.get_running_loop().create_future()
+        self.flow._qr_task.set_result("login_incomplete")
+        await self.flow.async_step_qr()
+        self.flow.async_abort.assert_called_once_with(reason="login_incomplete")
+
+    def test_translations_describe_totp_step(self):
+        for name in ("strings.json", "translations/ru.json", "translations/en.json"):
+            with self.subTest(translation=name):
+                config = json.loads((SOURCE.parent / name).read_text())["config"]
+                self.assertIn("sms_code", config["step"]["totp"]["data"])
+                self.assertIn("login_incomplete", config["abort"])

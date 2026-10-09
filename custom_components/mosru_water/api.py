@@ -25,6 +25,7 @@ _QR_REFRESH_URL    = "https://login.mos.ru/sps/login/methods/headless/qrCode/ref
 _QR_COMPLETE_URL   = "https://login.mos.ru/sps/login/methods/qrCode/complete"
 _QR_ASKTOTRUST_URL = "https://login.mos.ru/sps/login/ur/askToTrust"
 _SMS_URL           = "https://login.mos.ru/sps/login/methods/sms"
+_TOTP_PATH         = "/sps/login/methods2/totp"
 _SERVICE_PAGE_URL  = "https://www.mos.ru/services/pokazaniya-vodi-i-tepla/new/"
 
 # ed.mos.ru (Электронный дом) — рабочий API показаний. Прежний
@@ -111,6 +112,18 @@ def _parse_form(html: str) -> tuple[str, dict]:
         if name_m:
             hidden[name_m.group(1)] = value_m.group(1) if value_m else ""
     return action, hidden
+
+
+def _unfinished_login_step(url: str) -> str | None:
+    """Путь шага входа, если цепочка остановилась на login.mos.ru, иначе None.
+
+    Успешный вход уходит с login.mos.ru на satisfy портала. Страница
+    /sps/login/... означает, что mos.ru ждёт ещё одно действие пользователя.
+    """
+    parts = urllib.parse.urlsplit(url)
+    if parts.netloc == "login.mos.ru" and parts.path.startswith("/sps/login/"):
+        return parts.path
+    return None
 
 
 class MosRuAuthError(Exception):
@@ -291,7 +304,11 @@ class MosRuClient:
     def complete_qr_auth(self) -> str:
         """Завершить QR-авторизацию: POST qrCode/complete.
 
-        Returns: 'done' | 'sms_required'
+        Returns: 'done' | 'sms_required' | 'totp_required'
+
+        Raises:
+            MosRuAuthError: вход остановился на неизвестном шаге login.mos.ru —
+                SSO-сессии нет, считать вход успешным нельзя.
         """
         try:
             resp = self._session.post(
@@ -309,7 +326,55 @@ class MosRuClient:
             self._sms_page_url = resp.url
             self._sms_form_action, self._sms_hidden = _parse_form(resp.text)
             return "sms_required"
+        # Аккаунт защищён приложением-аутентификатором: QR подтверждает только
+        # первый фактор, SSO-сессия появится после ввода TOTP-кода.
+        if urllib.parse.urlsplit(resp.url).path == _TOTP_PATH:
+            self._totp_page_url = resp.url
+            return "totp_required"
+        if "askToTrust" in resp.url:
+            self._trust_device(resp)
+            return "done"
+        step = _unfinished_login_step(resp.url)
+        if step:
+            raise MosRuAuthError(f"Вход не завершён: mos.ru запросил шаг {step}")
         return "done"
+
+    def submit_totp(self, code: str) -> None:
+        """Отправить код из приложения-аутентификатора после QR-входа."""
+        page_url = getattr(self, "_totp_page_url", "")
+        if not page_url:
+            raise MosRuAuthError("Нет незавершённого входа с TOTP-кодом")
+        try:
+            resp = self._session.post(
+                page_url,
+                data={"otp": code},
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Referer": page_url,
+                    "Origin": "https://login.mos.ru",
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "same-origin",
+                    "Sec-Fetch-User": "?1",
+                },
+                allow_redirects=False,
+                timeout=_TIMEOUT,
+            )
+        except requests.RequestException as err:
+            raise MosRuApiError(f"Сетевая ошибка: {err}") from err
+        resp = self._follow_redirects(resp)
+
+        if urllib.parse.urlsplit(resp.url).path == _TOTP_PATH:
+            raise MosRuAuthError("Неверный код из приложения-аутентификатора")
+        if "askToTrust" in resp.url:
+            self._trust_device(resp)
+            return
+        if resp.status_code >= 400:
+            raise MosRuAuthError(f"Ошибка входа после TOTP-кода: HTTP {resp.status_code}")
+        step = _unfinished_login_step(resp.url)
+        if step:
+            raise MosRuAuthError(f"Вход не завершён: mos.ru запросил шаг {step}")
+        self._totp_page_url = ""
 
     def submit_sms_and_trust(self, code: str) -> None:
         """Отправить 6-значный код SMS/пуша и довериться устройству."""
@@ -345,66 +410,74 @@ class MosRuClient:
 
         # Если попали на askToTrust — доверяемся устройству
         if "askToTrust" in resp.url:
-            trust_page_url = resp.url
-            trust_form_action, trust_hidden = _parse_form(resp.text)
-            if trust_form_action.startswith("http"):
-                trust_url = trust_form_action
-            elif trust_form_action.startswith("/"):
-                trust_url = f"https://login.mos.ru{trust_form_action}"
-            else:
-                trust_url = trust_page_url or _QR_ASKTOTRUST_URL
+            self._trust_device(resp)
 
-            trust_data = {**trust_hidden, "action": "trust"}
+    def _trust_device(self, resp: requests.Response) -> None:
+        """Ответить «доверять устройству» на странице askToTrust."""
+        trust_page_url = resp.url
+        trust_form_action, trust_hidden = _parse_form(resp.text)
+        if trust_form_action.startswith("http"):
+            trust_url = trust_form_action
+        elif trust_form_action.startswith("/"):
+            trust_url = f"https://login.mos.ru{trust_form_action}"
+        else:
+            trust_url = trust_page_url or _QR_ASKTOTRUST_URL
+
+        trust_data = {**trust_hidden, "action": "trust"}
+        try:
+            resp2 = self._session.post(
+                trust_url,
+                data=trust_data,
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Referer": trust_page_url,
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "same-origin",
+                    "Sec-Fetch-User": "?1",
+                },
+                allow_redirects=False,
+                timeout=_TIMEOUT,
+            )
+        except requests.RequestException as err:
+            raise MosRuApiError(f"Сетевая ошибка: {err}") from err
+
+        resp2 = self._follow_redirects(resp2)
+
+        if resp2.status_code >= 400 and resp2.status_code < 500:
+            raise MosRuAuthError("Ошибка доверия устройству")
+        cookie_names = {c.name for c in self._session.cookies}
+        if "Ltpatoken2" not in cookie_names:
+            raise MosRuAuthError("Авторизация не завершена: Ltpatoken2 не установлен")
+
+    def _follow_redirects(self, resp: requests.Response) -> requests.Response:
+        """Пройти редиректы вручную, как браузерная навигация."""
+        for _ in range(15):
+            loc = resp.headers.get("Location", "")
+            if resp.status_code not in (301, 302, 303, 307, 308) or not loc:
+                break
+            if not loc.startswith("http"):
+                loc = urllib.parse.urljoin(resp.url, loc)
+            # satisfy требует sec-fetch-* заголовки как у браузерной навигации
+            req_headers: dict[str, str] = {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Referer": resp.url,
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "same-site",
+                "Sec-Fetch-User": "?1",
+                "Upgrade-Insecure-Requests": "1",
+            }
             try:
-                resp2 = self._session.post(
-                    trust_url,
-                    data=trust_data,
-                    headers={
-                        "Content-Type": "application/x-www-form-urlencoded",
-                        "Referer": trust_page_url,
-                        "Sec-Fetch-Dest": "document",
-                        "Sec-Fetch-Mode": "navigate",
-                        "Sec-Fetch-Site": "same-origin",
-                        "Sec-Fetch-User": "?1",
-                    },
+                resp = self._session.get(
+                    loc,
+                    headers=req_headers,
                     allow_redirects=False,
                     timeout=_TIMEOUT,
                 )
             except requests.RequestException as err:
                 raise MosRuApiError(f"Сетевая ошибка: {err}") from err
-
-            # Следуем редиректам вручную
-            for step in range(15):
-                loc = resp2.headers.get("Location", "")
-                if resp2.status_code not in (301, 302, 303, 307, 308) or not loc:
-                    break
-                if not loc.startswith("http"):
-                    loc = urllib.parse.urljoin(resp2.url, loc)
-                # satisfy требует sec-fetch-* заголовки как у браузерной навигации
-                req_headers: dict[str, str] = {
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Referer": resp2.url,
-                    "Sec-Fetch-Dest": "document",
-                    "Sec-Fetch-Mode": "navigate",
-                    "Sec-Fetch-Site": "same-site",
-                    "Sec-Fetch-User": "?1",
-                    "Upgrade-Insecure-Requests": "1",
-                }
-                try:
-                    resp2 = self._session.get(
-                        loc,
-                        headers=req_headers,
-                        allow_redirects=False,
-                        timeout=_TIMEOUT,
-                    )
-                except requests.RequestException as err:
-                    raise MosRuApiError(f"Сетевая ошибка: {err}") from err
-
-            if resp2.status_code >= 400 and resp2.status_code < 500:
-                raise MosRuAuthError("Ошибка доверия устройству")
-            cookie_names = {c.name for c in self._session.cookies}
-            if "Ltpatoken2" not in cookie_names:
-                raise MosRuAuthError("Авторизация не завершена: Ltpatoken2 не установлен")
+        return resp
 
     def try_refresh_acst(self) -> bool:
         """Обновить acst через официальный ACS probe endpoint.
