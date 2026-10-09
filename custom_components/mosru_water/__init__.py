@@ -87,6 +87,11 @@ def _async_register_services(hass: HomeAssistant) -> None:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Выгрузка интеграции."""
+    coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if coordinator is not None and (coordinator._io_lock.locked() or coordinator._manual_pending):
+        # A running executor cannot be safely cancelled after an external mutation.
+        # Refuse logout/reload until it finishes, so cookies are not cleared mid-write.
+        return False
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id)

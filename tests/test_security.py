@@ -270,6 +270,23 @@ class QrArtifactTests(unittest.TestCase):
 
 
 class ServiceAuthorizationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unload_refuses_running_portal_operation(self):
+        tree = ast.parse((ROOT / '__init__.py').read_text())
+        method = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef)
+                      and node.name == 'async_unload_entry')
+        module = ast.Module(body=[ast.ImportFrom(module='__future__', names=[ast.alias(name='annotations')], level=0), method], type_ignores=[])
+        ns = dict(DOMAIN='mosru_water', PLATFORMS=['sensor', 'button'])
+        exec(compile(ast.fix_missing_locations(module), 'unload_entry', 'exec'), ns)
+        lock = threading.Lock()
+        coordinator = SimpleNamespace(_io_lock=lock, _manual_pending=False)
+        hass = SimpleNamespace(data={'mosru_water': {'entry': coordinator}},
+            config_entries=SimpleNamespace(async_unload_platforms=AsyncMock(return_value=True)),
+            services=SimpleNamespace(async_remove=Mock()))
+        with lock:
+            self.assertFalse(await ns['async_unload_entry'](hass, SimpleNamespace(entry_id='entry')))
+        hass.config_entries.async_unload_platforms.assert_not_called()
+        self.assertTrue(await ns['async_unload_entry'](hass, SimpleNamespace(entry_id='entry')))
+
     async def test_confirmation_and_admin_registration(self):
         tree = ast.parse((ROOT / '__init__.py').read_text())
         method = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
