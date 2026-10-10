@@ -226,3 +226,23 @@ class TotpFlowTest(unittest.IsolatedAsyncioTestCase):
                 config = json.loads((SOURCE.parent / name).read_text())["config"]
                 self.assertIn("sms_code", config["step"]["totp"]["data"])
                 self.assertIn("login_incomplete", config["abort"])
+
+class ReauthReloadContractTest(unittest.IsolatedAsyncioTestCase):
+    async def test_setup_does_not_register_listener_conflicting_with_reauth_reload(self):
+        source = SOURCE.parent / '__init__.py'
+        tree = ast.parse(source.read_text())
+        setup = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef)
+                     and n.name == 'async_setup_entry')
+        coordinator = SimpleNamespace(async_config_entry_first_refresh=AsyncMock())
+        namespace = {'DOMAIN': 'mosru_water', 'PLATFORMS': ['sensor', 'button'],
+                     'MosRuWaterCoordinator': Mock(return_value=coordinator),
+                     '_async_register_services': Mock()}
+        module = ast.Module(body=[ast.ImportFrom(module='__future__',
+                          names=[ast.alias(name='annotations')], level=0), setup], type_ignores=[])
+        exec(compile(ast.fix_missing_locations(module), str(source), 'exec'), namespace)
+        entry = SimpleNamespace(entry_id='entry', add_update_listener=Mock(), async_on_unload=Mock())
+        hass = SimpleNamespace(data={}, config_entries=SimpleNamespace(async_forward_entry_setups=AsyncMock()))
+        self.assertTrue(await namespace['async_setup_entry'](hass, entry))
+        entry.add_update_listener.assert_not_called()
+        coordinator.async_config_entry_first_refresh.assert_awaited_once()
+        hass.config_entries.async_forward_entry_setups.assert_awaited_once()
