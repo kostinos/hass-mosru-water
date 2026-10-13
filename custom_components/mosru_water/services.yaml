@@ -13,6 +13,13 @@ replace_readings:
     Внимание: удаляется последнее показание независимо от того, кто его внёс —
     оно могло прийти от управляющей компании.
   fields:
+    confirm:
+      name: Подтвердить удаление
+      description: Явно разрешить удаление последних показаний перед заменой.
+      required: true
+      default: false
+      selector:
+        boolean:
     entry_id:
       name: ID записи
       description: >-

@@ -1,14 +1,6 @@
 {
   "config": {
     "step": {
-      "user": {
-        "title": "Personal account details",
-        "description": "Enter the data from your utility bill. Authorization on mos.ru will be performed via a QR code in the next step.",
-        "data": {
-          "paycode": "Payer code (EPD, 10 digits)",
-          "flat": "Apartment number"
-        }
-      },
       "qr": {
         "title": "Authorization via QR code",
         "description": "Scan the QR code with the **mos.ru** or **Gosuslugi Moscow** app:\n\n![QR code]({qr_url})\n\nAfter scanning, authorization will complete automatically.\n\n*If the QR code is not displayed, try refreshing the page.*"
@@ -17,7 +9,21 @@
         "title": "Login confirmation (2FA)",
         "description": "Open the **mos.ru** or **Gosuslugi Moscow** app and tap **\"Confirm login\"**.\n\nAfter tapping, you will receive a push notification with a 6-digit code — enter it below.",
         "data": {
-          "sms_code": "6-digit code from the push notification"
+          "sms_code": "Confirmation code"
+        }
+      },
+      "totp": {
+        "title": "Authenticator app code",
+        "description": "QR login was confirmed, but your mos.ru account is protected with an authenticator app.\n\nOpen your authenticator app and enter the current 6-digit mos.ru code.",
+        "data": {
+          "sms_code": "Confirmation code"
+        }
+      },
+      "place": {
+        "title": "Apartment",
+        "description": "Apartments from your Electronic House (ed.mos.ru) profile.",
+        "data": {
+          "user_place_id": "Apartment"
         }
       },
       "discover": {
@@ -46,14 +52,19 @@
       "entity_not_found": "Sensor not found in Home Assistant",
       "wrong_unit": "Sensor must return a value in m³",
       "invalid_code": "Invalid confirmation code. Please try again.",
-      "required": "This field is required"
+      "required": "This field is required",
+      "cannot_get_places": "Could not get the apartment list from Electronic House: {error}. Submit the form again to retry.",
+      "duplicate_counters": "Choose different cold and hot water meters"
     },
     "abort": {
       "already_configured": "Integration is already configured",
       "cannot_connect": "Failed to connect to mos.ru",
       "cannot_get_counters": "Failed to retrieve meter list",
       "session_expired": "mos.ru session has expired, re-authorization is required",
-      "reauth_successful": "Authorization updated successfully"
+      "login_incomplete": "mos.ru login was not completed: the portal requested a step this integration does not support. See the Home Assistant log for details.",
+      "reauth_successful": "Authorization updated successfully",
+      "no_places": "Your Electronic House profile has no apartments. Add one at ed.mos.ru and start the setup again.",
+      "already_in_progress": "A mos.ru login is already in progress. Finish or cancel the other flow."
     }
   },
   "options": {

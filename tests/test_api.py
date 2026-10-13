@@ -79,7 +79,7 @@ class ParseResponseTest(unittest.TestCase):
     """Разбор ответов: главное — не считать провал успехом."""
 
     def test_success_passthrough(self):
-        payload = {"data": {"result": True, "counterId": 1158038}}
+        payload = {"data": {"result": True, "counterId": 900101}}
         self.assertEqual(_parse_api_response(FakeResponse(200, payload)), payload)
 
     def test_already_submitted_is_dedicated_error(self):
@@ -141,14 +141,14 @@ class ClientCallsTest(unittest.TestCase):
 
     def test_send_reading_uses_put_and_int_indication(self):
         self._reply(200, {"data": {"result": True}})
-        self.client.send_reading("1152619", "1158038", 483.74, period="2026-08-31")
+        self.client.send_reading("900001", "900101", 483.74, period="2026-08-31")
 
         method, url = self.session.request.call_args[0]
         params = self.session.request.call_args.kwargs["params"]
         self.assertEqual(method, "PUT")
         self.assertTrue(url.endswith("/efp/counters/addIndications/"))
-        self.assertEqual(params["userPlaceId"], "1152619")
-        self.assertEqual(params["counterId"], "1158038")
+        self.assertEqual(params["userPlaceId"], "900001")
+        self.assertEqual(params["counterId"], "900101")
         # Портал принимает только целые м³
         self.assertEqual(params["indication"], 484)
         self.assertIsInstance(params["indication"], int)
@@ -156,58 +156,58 @@ class ClientCallsTest(unittest.TestCase):
 
     def test_send_reading_defaults_period_to_end_of_month(self):
         self._reply(200, {"data": {"result": True}})
-        self.client.send_reading("1152619", "1158038", 100.0)
+        self.client.send_reading("900001", "900101", 100.0)
         params = self.session.request.call_args.kwargs["params"]
         self.assertEqual(params["period"], _period_end_of_month())
 
     def test_send_reading_rejects_result_false(self):
         self._reply(200, {"data": {"result": False}})
         with self.assertRaises(MosRuApiError):
-            self.client.send_reading("1152619", "1158038", 100.0)
+            self.client.send_reading("900001", "900101", 100.0)
 
     def test_send_reading_propagates_already_submitted(self):
         self._reply(400, {"code": 400, "error": "Показание за данный период уже внесено."})
         with self.assertRaises(MosRuAlreadySubmittedError):
-            self.client.send_reading("1152619", "1158038", 100.0)
+            self.client.send_reading("900001", "900101", 100.0)
 
     def test_send_reading_does_not_retry(self):
         """Повтор PUT мог бы создать дубль — ретраи здесь запрещены."""
         self._reply(503, {})
         with self.assertRaises(MosRuTemporaryError):
-            self.client.send_reading("1152619", "1158038", 100.0)
+            self.client.send_reading("900001", "900101", 100.0)
         self.assertEqual(self.session.request.call_count, 1)
 
     def test_remove_last_indication_uses_delete(self):
         self._reply(200, {"data": {"result": True}})
-        self.client.remove_last_indication("1152619", "1158038")
+        self.client.remove_last_indication("900001", "900101")
 
         method, url = self.session.request.call_args[0]
         params = self.session.request.call_args.kwargs["params"]
         self.assertEqual(method, "DELETE")
         self.assertTrue(url.endswith("/efp/counters/removeLastValue/"))
-        self.assertEqual(params, {"counterId": "1158038", "userPlaceId": "1152619"})
+        self.assertEqual(params, {"counterId": "900101", "userPlaceId": "900001"})
 
 
-# Ответ listByPayerCode, сокращённый до используемых полей (из HAR).
+# Synthetic household identifiers; only the response shape follows the API.
 _COUNTERS_PAYLOAD = {
     "data": [{
-        "userPlaceId": 1152619,
-        "fls": "1730249056",
-        "flat": "218",
+        "userPlaceId": 900001,
+        "fls": "0000000101",
+        "flat": "12",
         "activeCounters": [
             {
-                "counterId": 1158038,
+                "counterId": 900101,
                 "typeName": "ХВС",
-                "num": "14-007378",
+                "num": "TEST-COLD-001",
                 "checkUpDate": "2032-07-16",
                 "checkupStatus": "OK",
                 "enableTransfer": True,
                 "lastIndication": {"period": "2026-08-31", "indication": 483.0, "source": "22"},
             },
             {
-                "counterId": 1158039,
+                "counterId": 900102,
                 "typeName": "ГВС",
-                "num": "14-087265",
+                "num": "TEST-HOT-001",
                 "checkUpDate": "2032-07-16",
                 "checkupStatus": "OK",
                 "enableTransfer": False,
@@ -226,31 +226,31 @@ class CountersParsingTest(unittest.TestCase):
         self.session.request.return_value = FakeResponse(200, _COUNTERS_PAYLOAD)
 
     def test_get_counters(self):
-        self.assertEqual(self.client.get_counters("1152619"), [
-            {"id": "1158038", "name": "14-007378", "type": "ХВС"},
-            {"id": "1158039", "name": "14-087265", "type": "ГВС"},
+        self.assertEqual(self.client.get_counters("900001"), [
+            {"id": "900101", "name": "TEST-COLD-001", "type": "ХВС"},
+            {"id": "900102", "name": "TEST-HOT-001", "type": "ГВС"},
         ])
 
     def test_get_device_info_maps_fields(self):
-        info = self.client.get_device_info("1152619")
-        self.assertEqual(set(info), {"1158038", "1158039"})
-        cold = info["1158038"]
+        info = self.client.get_device_info("900001")
+        self.assertEqual(set(info), {"900101", "900102"})
+        cold = info["900101"]
         self.assertEqual(cold["type"], "ХВС")
-        self.assertEqual(cold["number"], "14-007378")
+        self.assertEqual(cold["number"], "TEST-COLD-001")
         self.assertEqual(cold["current_reading"], 483.0)
         self.assertEqual(cold["reading_period"], "2026-08-31")
         self.assertEqual(cold["inspection_date"], "2032-07-16")
         self.assertEqual(cold["inspection_status"], "OK")
 
     def test_readonly_inverts_enable_transfer(self):
-        info = self.client.get_device_info("1152619")
-        self.assertFalse(info["1158038"]["readonly"])   # enableTransfer: True
-        self.assertTrue(info["1158039"]["readonly"])    # enableTransfer: False
+        info = self.client.get_device_info("900001")
+        self.assertFalse(info["900101"]["readonly"])   # enableTransfer: True
+        self.assertTrue(info["900102"]["readonly"])    # enableTransfer: False
 
     def test_unexpected_payload_raises(self):
         self.session.request.return_value = FakeResponse(200, {"data": None})
         with self.assertRaises(MosRuApiError):
-            self.client.get_device_info("1152619")
+            self.client.get_device_info("900001")
 
     def test_missing_active_counters_is_empty(self):
         self.session.request.return_value = FakeResponse(200, {"data": [{"userPlaceId": 1}]})
@@ -260,10 +260,10 @@ class CountersParsingTest(unittest.TestCase):
 # Ответ getInfo: квартиры лежат в data.addresses, flat приходит числом.
 _PROFILE_PAYLOAD = {
     "data": {
-        "user": {"nickName": "Олег К"},
+        "user": {"nickName": "Тестовый профиль"},
         "addresses": [
             {"userPlaceId": 999001, "fls": "1111111111", "flat": 5},
-            {"userPlaceId": 1152619, "fls": "1730249056", "flat": 218},
+            {"userPlaceId": 900001, "fls": "0000000101", "flat": 12},
         ],
     }
 }
@@ -277,18 +277,18 @@ class FindUserPlaceIdTest(unittest.TestCase):
         self.session.request.return_value = FakeResponse(200, _PROFILE_PAYLOAD)
 
     def test_finds_by_paycode_and_flat(self):
-        self.assertEqual(self.client.find_user_place_id("1730249056", "218"), "1152619")
+        self.assertEqual(self.client.find_user_place_id("0000000101", "12"), "900001")
 
     def test_flat_compared_as_string(self):
         """flat в ответе — число, в конфиге строка: сравнение должно совпасть."""
-        self.assertEqual(self.client.find_user_place_id("1730249056", 218), "1152619")
+        self.assertEqual(self.client.find_user_place_id("0000000101", 12), "900001")
 
     def test_paycode_only(self):
         self.assertEqual(self.client.find_user_place_id("1111111111", ""), "999001")
 
     def test_wrong_flat_not_matched(self):
         with self.assertRaises(MosRuApiError):
-            self.client.find_user_place_id("1730249056", "999")
+            self.client.find_user_place_id("0000000101", "999")
 
     def test_unknown_paycode_raises(self):
         with self.assertRaises(MosRuApiError):
@@ -297,7 +297,125 @@ class FindUserPlaceIdTest(unittest.TestCase):
     def test_empty_addresses(self):
         self.session.request.return_value = FakeResponse(200, {"data": {}})
         with self.assertRaises(MosRuApiError):
-            self.client.find_user_place_id("1730249056", "218")
+            self.client.find_user_place_id("0000000101", "12")
+
+
+# Ответ getInfo с полями, которые нужны для выбора квартиры (ключи — из живого ответа).
+_PLACES_PAYLOAD = {
+    "data": {
+        "addresses": [
+            {"userPlaceId": 3395115, "fls": "1344364128", "flat": "46",
+             "addressCaption": "ул. Тестовая, д. 1", "caption": "Дом"},
+            {"userPlaceId": 999001, "fls": "1111111111", "flat": 5, "caption": "Дача"},
+            # повтор той же квартиры
+            {"userPlaceId": 3395115, "fls": "1344364128", "flat": "46"},
+            # без userPlaceId — адресовать нельзя
+            {"fls": "2222222222", "flat": "7"},
+            {"userPlaceId": 777, "fls": None, "flat": None},
+            "garbage",
+        ],
+    }
+}
+
+
+class ListPlacesTest(unittest.TestCase):
+    def setUp(self):
+        self.client = MosRuClient()
+        self.session = mock.Mock()
+        self.client._session = self.session
+        self.session.request.return_value = FakeResponse(200, _PLACES_PAYLOAD)
+
+    def test_requests_profile(self):
+        self.client.list_places()
+        method, url = self.session.request.call_args[0]
+        self.assertEqual(method, "GET")
+        self.assertTrue(url.endswith("/profile/user/getInfo/"))
+
+    def test_normalizes_and_deduplicates(self):
+        self.assertEqual(self.client.list_places(), [
+            {"user_place_id": "3395115", "paycode": "1344364128", "flat": "46",
+             "address": "ул. Тестовая, д. 1"},
+            {"user_place_id": "999001", "paycode": "1111111111", "flat": "5",
+             "address": "Дача"},
+            {"user_place_id": "777", "paycode": "", "flat": "", "address": ""},
+        ])
+
+    def test_empty_profile(self):
+        self.session.request.return_value = FakeResponse(200, {"data": {}})
+        self.assertEqual(self.client.list_places(), [])
+
+
+_COLD = {"id": "1", "name": "TEST-COLD-001", "type": "ХВС"}
+_HOT = {"id": "2", "name": "TEST-HOT-001", "type": "ГВС"}
+
+
+class PickCountersTest(unittest.TestCase):
+    def test_one_cold_one_hot(self):
+        self.assertEqual(api.pick_counters([_HOT, _COLD]), ("1", "2"))
+
+    def test_two_cold_meters_are_ambiguous(self):
+        cold2 = {"id": "3", "name": "x", "type": "ХВС"}
+        self.assertEqual(api.pick_counters([_COLD, cold2, _HOT]), (None, "2"))
+
+    def test_unknown_types(self):
+        self.assertEqual(
+            api.pick_counters([{"id": "5", "name": "x", "type": ""},
+                               {"id": "6", "name": "y", "type": "ЭЛ"}]),
+            (None, None),
+        )
+
+    def test_empty(self):
+        self.assertEqual(api.pick_counters([]), (None, None))
+
+    def test_type_case_and_spaces(self):
+        self.assertEqual(
+            api.pick_counters([{"id": "1", "name": "a", "type": " хвс "},
+                               {"id": "2", "name": "b", "type": "гвс"}]),
+            ("1", "2"),
+        )
+
+
+class CountersOfTypeTest(unittest.TestCase):
+    def test_filters_by_type(self):
+        self.assertEqual(api.counters_of_type([_COLD, _HOT], api.COLD_TYPE), [_COLD])
+
+    def test_falls_back_to_all_when_type_missing(self):
+        other = {"id": "9", "name": "z", "type": ""}
+        self.assertEqual(api.counters_of_type([other], api.HOT_TYPE), [other])
+
+    def test_type_argument_is_normalized(self):
+        spaced = {"id": "2", "name": "b", "type": " гвс "}
+        self.assertEqual(api.counters_of_type([_COLD, spaced], api.HOT_TYPE), [spaced])
+        self.assertEqual(api.counters_of_type([_COLD, spaced], " гвс "), [spaced])
+
+
+class PlaceLabelTest(unittest.TestCase):
+    def test_full(self):
+        self.assertEqual(
+            api.place_label({"user_place_id": "1", "paycode": "1344364128",
+                             "flat": "46", "address": "ул. Тестовая, д. 1"}),
+            "ул. Тестовая, д. 1, кв. 46 — ЕПД 1344364128",
+        )
+
+    def test_without_address(self):
+        self.assertEqual(
+            api.place_label({"user_place_id": "1", "paycode": "1344364128",
+                             "flat": "46", "address": ""}),
+            "кв. 46 — ЕПД 1344364128",
+        )
+
+    def test_paycode_only(self):
+        self.assertEqual(
+            api.place_label({"user_place_id": "1", "paycode": "1344364128",
+                             "flat": "", "address": ""}),
+            "ЕПД 1344364128",
+        )
+
+    def test_only_id(self):
+        self.assertEqual(
+            api.place_label({"user_place_id": "777", "paycode": "", "flat": "", "address": ""}),
+            "777",
+        )
 
 
 class AuthorizeEdTest(unittest.TestCase):
@@ -358,6 +476,108 @@ class SessionNetworkTest(unittest.TestCase):
             url="https://ed.mos.ru/security/callback/sudir/login?code=test")
         self.session.post.return_value = FakeResponse(503, {})
         with self.assertRaises(MosRuTemporaryError): self.client.authorize_ed()
+
+
+_TOTP_URL = "https://login.mos.ru/sps/login/methods2/totp?bo=%2Fsps%2Foauth%2Fae"
+_TRUST_URL = "https://login.mos.ru/sps/login/ur/askToTrust?bo=%2Fsps%2Foauth%2Fae"
+_SATISFY_URL = "https://www.mos.ru/api/acs/v1/login/satisfy?code=test"
+
+
+def _page(status: int, url: str, *, location: str | None = None, text: str = ""):
+    """Ответ login.mos.ru: для редиректов — Location, для страниц — HTML."""
+    return mock.Mock(
+        status_code=status, url=url, text=text, history=[],
+        headers={"Location": location} if location else {},
+    )
+
+
+class QrSecondFactorTest(unittest.TestCase):
+    """После сканирования QR mos.ru может запросить второй фактор.
+
+    Цепочка из реального входа аккаунта с приложением-аутентификатором:
+    POST qrCode/complete → 303 → /sps/login/methods2/totp. Пока код не введён,
+    SSO-сессии нет, и вход в ed.mos.ru уходит на форму пароля.
+    """
+
+    def setUp(self):
+        self.client = MosRuClient()
+        self.session = mock.Mock()
+        self.session.cookies = []
+        self.client._session = self.session
+
+    def test_totp_page_requires_code(self):
+        self.session.post.return_value = _page(200, _TOTP_URL)
+        self.assertEqual(self.client.complete_qr_auth(), "totp_required")
+
+    def test_leaving_login_host_is_done(self):
+        self.session.post.return_value = _page(200, "https://www.mos.ru/")
+        self.assertEqual(self.client.complete_qr_auth(), "done")
+
+    def test_unknown_login_step_is_not_reported_as_done(self):
+        # Раньше любой неизвестный шаг считался успехом, а ошибка всплывала
+        # позже как «сессия истекла».
+        self.session.post.return_value = _page(
+            200, "https://login.mos.ru/sps/login/methods/password?bo=%2Fsps")
+        with self.assertRaises(MosRuAuthError) as ctx:
+            self.client.complete_qr_auth()
+        self.assertIn("/sps/login/methods/password", str(ctx.exception))
+
+    def _start_totp(self):
+        self.session.post.return_value = _page(200, _TOTP_URL)
+        self.client.complete_qr_auth()
+        self.session.reset_mock()
+
+    def test_totp_code_is_posted_to_totp_page(self):
+        self._start_totp()
+        self.session.post.return_value = _page(303, _TOTP_URL, location=_SATISFY_URL)
+        self.session.get.side_effect = [
+            _page(302, _SATISFY_URL, location="https://www.mos.ru/"),
+            _page(200, "https://www.mos.ru/"),
+        ]
+
+        self.client.submit_totp("123456")
+
+        args, kwargs = self.session.post.call_args
+        self.assertEqual(args[0], _TOTP_URL)
+        self.assertEqual(kwargs["data"], {"otp": "123456"})
+        self.assertFalse(kwargs["allow_redirects"])
+        # satisfy требует навигационных заголовков, как у браузера.
+        first_hop = self.session.get.call_args_list[0]
+        self.assertEqual(first_hop.args[0], _SATISFY_URL)
+        self.assertEqual(first_hop.kwargs["headers"]["Sec-Fetch-Mode"], "navigate")
+
+    def test_wrong_totp_code_stays_on_totp_page(self):
+        self._start_totp()
+        self.session.post.return_value = _page(200, _TOTP_URL)
+        with self.assertRaises(MosRuAuthError):
+            self.client.submit_totp("000000")
+
+    def test_totp_then_trust_device(self):
+        self._start_totp()
+        trust_form = (
+            '<form action="/sps/login/ur/askToTrust?bo=%2Fsps" method="post">'
+            '<input type="hidden" name="csrf" value="tok"></form>'
+        )
+        self.session.post.side_effect = [
+            _page(303, _TOTP_URL, location=_TRUST_URL),
+            _page(302, _TRUST_URL, location="https://www.mos.ru/"),
+        ]
+        self.session.get.side_effect = [
+            _page(200, _TRUST_URL, text=trust_form),
+            _page(200, "https://www.mos.ru/"),
+        ]
+        self.session.cookies = [mock.Mock(name="cookie")]
+        self.session.cookies[0].name = "Ltpatoken2"
+
+        self.client.submit_totp("123456")
+
+        trust_call = self.session.post.call_args_list[1]
+        self.assertEqual(trust_call.kwargs["data"], {"csrf": "tok", "action": "trust"})
+
+    def test_totp_without_pending_login_fails(self):
+        with self.assertRaises(MosRuAuthError):
+            self.client.submit_totp("123456")
+        self.session.post.assert_not_called()
 
 
 if __name__ == "__main__":
