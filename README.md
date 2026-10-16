@@ -1,7 +1,5 @@
 # MOS.RU Water Meter
 
-![Downloads](https://img.shields.io/badge/dynamic/json?color=41BDF5&logo=home-assistant&label=Downloads&suffix=%20installs&cacheSeconds=15600&style=for-the-badge&url=https://analytics.home-assistant.io/custom_integrations.json&query=$.mosru_water.total)
-
 HACS-интеграция для Home Assistant: автоматически передаёт показания счётчиков воды на портал mos.ru в заданный день месяца.
 
 Авторизация выполняется через QR-код — пароль вводить не нужно. Показания берутся из любых сенсоров Home Assistant с единицей измерения `м³`.
