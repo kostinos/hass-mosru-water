@@ -57,7 +57,7 @@
       "duplicate_counters": "Choose different cold and hot water meters"
     },
     "abort": {
-      "already_configured": "Integration is already configured",
+      "already_configured": "This flat is already configured",
       "cannot_connect": "Failed to connect to mos.ru",
       "cannot_get_counters": "Failed to retrieve meter list",
       "session_expired": "mos.ru session has expired, re-authorization is required",

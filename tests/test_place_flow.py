@@ -33,6 +33,10 @@ class FlowTestBase(unittest.IsolatedAsyncioTestCase):
         self.flow.async_show_form = Mock(return_value={"type": "form"})
         self.flow.async_abort = Mock(return_value={"type": "abort"})
         self.flow.async_step_sensors = AsyncMock(return_value={"type": "sensors"})
+        # Проверки дубликатов из HA ConfigFlow: прерывают мастер исключением.
+        self.flow.async_set_unique_id = AsyncMock()
+        self.flow._abort_if_unique_id_configured = Mock()
+        self.flow._async_abort_entries_match = Mock()
 
     def form_kwargs(self):
         return self.flow.async_show_form.call_args.kwargs
@@ -47,10 +51,13 @@ class UserStepTest(FlowTestBase):
         self.flow.async_step_qr.assert_awaited_once()
         self.flow.async_show_form.assert_not_called()
 
-    async def test_single_entry_only(self):
+    async def test_another_flat_can_be_added(self):
+        # Вторая квартира, в том числе на другом аккаунте mos.ru.
         self.flow._async_current_entries = Mock(return_value=["entry"])
+        self.flow.async_step_qr = AsyncMock(return_value={"type": "progress"})
         await self.flow.async_step_user()
-        self.flow.async_abort.assert_called_once_with(reason="already_configured")
+        self.flow.async_step_qr.assert_awaited_once()
+        self.flow.async_abort.assert_not_called()
 
     async def test_qr_success_leads_to_place(self):
         self.flow._client.get_session_cookies.return_value = {"c": "v"}
@@ -94,6 +101,24 @@ class PlaceStepTest(FlowTestBase):
         self.assertEqual(len(options), 2)
         labels = [c.kwargs["label"] for c in selector.SelectOptionDict.call_args_list]
         self.assertIn("ул. Тестовая, д. 1, кв. 46 — ЕПД 1344364128", labels)
+        self.flow.async_step_discover.assert_not_awaited()
+
+    async def test_place_becomes_unique_id(self):
+        self.flow._client.list_places.return_value = [_PLACE_A]
+        await self.flow.async_step_place()
+        self.flow.async_set_unique_id.assert_awaited_once_with("3395115")
+        self.flow._abort_if_unique_id_configured.assert_called_once()
+        # Записи без unique_id (созданные раньше) сверяются по data.
+        self.flow._async_abort_entries_match.assert_called_once_with(
+            {"user_place_id": "3395115"})
+
+    async def test_already_added_place_stops_wizard(self):
+        class AbortFlow(Exception): pass
+        self.flow._client.list_places.return_value = [_PLACE_A]
+        self.flow._async_abort_entries_match.side_effect = AbortFlow("already_configured")
+        with self.assertRaises(AbortFlow):
+            await self.flow.async_step_place()
+        self.assertEqual(self.flow._data, {})
         self.flow.async_step_discover.assert_not_awaited()
 
     async def test_choice_is_saved(self):

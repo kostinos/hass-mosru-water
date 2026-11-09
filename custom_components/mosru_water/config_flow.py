@@ -129,10 +129,12 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Начать настройку: квартира выбирается из профиля после входа."""
-        if self._async_current_entries():
-            return self.async_abort(reason="already_configured")
+        """Начать настройку: квартира выбирается из профиля после входа.
 
+        Записей может быть несколько — по одной на квартиру (например, две
+        квартиры на разных аккаунтах mos.ru); повтор квартиры отсекает
+        _async_select_place().
+        """
         self._client = MosRuClient()
         return await self.async_step_qr()
 
@@ -414,7 +416,13 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def _async_select_place(self, place: dict) -> FlowResult:
         """Запомнить квартиру: по userPlaceId идут все запросы к ed.mos.ru,
-        paycode и flat нужны имени устройства и повторному поиску после выхода."""
+        paycode и flat нужны имени устройства и повторному поиску после выхода.
+
+        Одна запись на квартиру: unique_id — userPlaceId. Записи, созданные до
+        появления unique_id, ловит сверка с data."""
+        await self.async_set_unique_id(place["user_place_id"])
+        self._abort_if_unique_id_configured()
+        self._async_abort_entries_match({CONF_USER_PLACE_ID: place["user_place_id"]})
         self._data[CONF_USER_PLACE_ID] = place["user_place_id"]
         self._data[CONF_PAYCODE] = place["paycode"]
         self._data[CONF_FLAT] = place["flat"]
