@@ -424,6 +424,7 @@ class AuthorizeEdTest(unittest.TestCase):
     def setUp(self):
         self.client = MosRuClient()
         self.session = mock.Mock()
+        self.session.cookies = api.requests.cookies.RequestsCookieJar()
         self.client._session = self.session
 
     def test_authorize_success(self):
@@ -582,3 +583,58 @@ class QrSecondFactorTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AuthorizeEdStaleCookiesTest(unittest.TestCase):
+    """Вход в ed.mos.ru после restore_session(): устаревшие cookies ed.mos.ru
+    не должны приводить к повторному входу по QR, пока жива сессия mos.ru."""
+
+    def _client(self, statuses, *, ed_cookies=True):
+        client = MosRuClient()
+        client.restore_session({
+            "Ltpatoken2": {"value": "sso", "domain": ".mos.ru", "path": "/"},
+            **({
+                "Authorization": {"value": "old", "domain": ".ed.mos.ru", "path": "/"},
+                "Refresh": {"value": "old", "domain": ".ed.mos.ru", "path": "/"},
+            } if ed_cookies else {}),
+        })
+        session = client._session
+        sent = []  # имена cookies, с которыми ушёл каждый обмен кода
+        oauth = mock.Mock(status_code=200, url="https://ed.mos.ru/callback?code=abc")
+        responses = iter(statuses)
+
+        def post(url, **kwargs):
+            sent.append(sorted(c.name for c in session.cookies))
+            return FakeResponse(next(responses), {})
+
+        session.get = mock.Mock(return_value=oauth)
+        session.post = mock.Mock(side_effect=post)
+        return client, sent
+
+    def test_fresh_session_logs_in_once(self):
+        client, sent = self._client([200])
+        client.authorize_ed()
+        self.assertEqual(sent, [["Authorization", "Ltpatoken2", "Refresh"]])
+
+    def test_stale_ed_cookies_are_dropped_and_login_retried(self):
+        client, sent = self._client([401, 200])
+        client.authorize_ed()
+        self.assertEqual(sent, [["Authorization", "Ltpatoken2", "Refresh"], ["Ltpatoken2"]])
+
+    def test_rejection_without_ed_cookies_needs_reauth(self):
+        client, sent = self._client([401], ed_cookies=False)
+        with self.assertRaises(MosRuAuthError):
+            client.authorize_ed()
+        self.assertEqual(len(sent), 1)
+
+    def test_rejection_after_retry_needs_reauth(self):
+        client, sent = self._client([403, 403])
+        with self.assertRaises(MosRuAuthError):
+            client.authorize_ed()
+        self.assertEqual(len(sent), 2)
+
+    def test_server_error_is_not_retried(self):
+        client, sent = self._client([500])
+        with self.assertRaises((MosRuTemporaryError, MosRuApiError)):
+            client.authorize_ed()
+        self.assertEqual(len(sent), 1)

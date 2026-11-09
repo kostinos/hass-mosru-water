@@ -34,6 +34,7 @@ python3 -m venv .venv
 | `CountersParsingTest` | разбор `listByPayerCode`, инверсия `enableTransfer` → `readonly` |
 | `FindUserPlaceIdTest` | поиск `userPlaceId` в `data.addresses`, сравнение `flat` как строки (портал отдаёт число) |
 | `AuthorizeEdTest` | OAuth: извлечение `code`, обмен на сессию, истёкшая сессия |
+| `AuthorizeEdStaleCookiesTest` | после перезапуска HA: устаревшие cookies `ed.mos.ru` удаляются и вход повторяется один раз, без QR |
 
 Ключевой регресс, который они закрывают — `test_404_is_error_not_success`:
 интеграция «успешно отправляла» показания на несуществующий эндпоинт с самого
