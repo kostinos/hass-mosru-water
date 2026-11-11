@@ -32,6 +32,7 @@ from .const import (
     CONF_SESSION_COOKIES,
     UNIT_M3,
 )
+from .entry_identity import entry_title, place_unique_id
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -105,6 +106,16 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._qr_link: str = ""
         self._reauth_entry: config_entries.ConfigEntry | None = None
 
+    @staticmethod
+    def _place_unique_id(place: dict) -> str:
+        """Вернуть стабильный ID квартиры, не привязанный к профилю mos.ru."""
+        return place_unique_id(place)
+
+    @staticmethod
+    def _entry_title(data: dict) -> str:
+        """Сделать несколько записей интеграции различимыми в интерфейсе HA."""
+        return entry_title(data)
+
     async def _async_cleanup_qr(self, url: str | None = None) -> None:
         url = self._qr_url if url is None else url
         if self._qr_url == url:
@@ -129,10 +140,12 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Начать настройку: квартира выбирается из профиля после входа."""
-        if self._async_current_entries():
-            return self.async_abort(reason="already_configured")
+        """Начать настройку: квартира выбирается из профиля после входа.
 
+        Записей может быть несколько — по одной на квартиру (например, две
+        квартиры на разных аккаунтах mos.ru); повтор квартиры отсекает
+        _async_select_place().
+        """
         self._client = MosRuClient()
         return await self.async_step_qr()
 
@@ -436,7 +449,21 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def _async_select_place(self, place: dict) -> FlowResult:
         """Запомнить квартиру: по userPlaceId идут все запросы к ed.mos.ru,
-        paycode и flat нужны имени устройства и повторному поиску после выхода."""
+        paycode и flat нужны имени устройства и повторному поиску после выхода.
+
+        Одна запись на квартиру: при наличии ЕПД стабильный unique_id не зависит от
+        аккаунта mos.ru. Записи без unique_id ловит сверка с data."""
+        await self.async_set_unique_id(self._place_unique_id(place))
+        self._abort_if_unique_id_configured()
+        if place.get("paycode"):
+            self._async_abort_entries_match({
+                CONF_PAYCODE: str(place["paycode"]),
+                CONF_FLAT: str(place.get("flat") or ""),
+            })
+        else:
+            self._async_abort_entries_match({
+                CONF_USER_PLACE_ID: place["user_place_id"],
+            })
         self._data[CONF_USER_PLACE_ID] = place["user_place_id"]
         self._data[CONF_PAYCODE] = place["paycode"]
         self._data[CONF_FLAT] = place["flat"]
@@ -570,7 +597,7 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not errors:
                 self._data.update(user_input)
                 return self.async_create_entry(
-                    title="MOS.RU Water Meter",
+                    title=self._entry_title(self._data),
                     data=self._data,
                 )
 

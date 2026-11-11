@@ -13,6 +13,7 @@ from homeassistant.helpers.service import async_register_admin_service
 
 from .const import DOMAIN
 from .coordinator import MosRuWaterCoordinator
+from .entry_identity import legacy_entry_updates
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -29,6 +30,9 @@ _REPLACE_SCHEMA = vol.Schema({
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Настройка интеграции из config entry."""
+    if updates := legacy_entry_updates(entry.title, entry.unique_id, entry.data):
+        hass.config_entries.async_update_entry(entry, **updates)
+
     hass.data.setdefault(DOMAIN, {})
 
     coordinator = MosRuWaterCoordinator(hass, entry)

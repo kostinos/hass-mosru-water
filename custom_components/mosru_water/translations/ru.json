@@ -69,7 +69,7 @@
       "duplicate_counters": "Выберите разные счётчики ХВС и ГВС"
     },
     "abort": {
-      "already_configured": "Интеграция уже настроена",
+      "already_configured": "Эта квартира уже добавлена",
       "cannot_connect": "Не удалось подключиться к mos.ru",
       "cannot_get_counters": "Не удалось получить список счётчиков",
       "session_expired": "Сессия mos.ru истекла, требуется повторная авторизация",
