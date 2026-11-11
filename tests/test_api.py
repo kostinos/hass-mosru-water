@@ -33,6 +33,7 @@ MosRuClient = api.MosRuClient
 MosRuTemporaryError = api.MosRuTemporaryError
 _parse_api_response = api._parse_api_response
 _period_end_of_month = api._period_end_of_month
+_auth_controls_summary = api._auth_controls_summary
 
 
 class FakeResponse:
@@ -87,6 +88,31 @@ class ParseResponseTest(unittest.TestCase):
         resp = FakeResponse(400, {"code": 400, "error": "Показание за данный период уже внесено."})
         with self.assertRaises(MosRuAlreadySubmittedError):
             _parse_api_response(resp)
+
+
+class AuthControlsProbeTest(unittest.TestCase):
+    def test_reports_control_shape_without_hidden_values_or_query_values(self):
+        html = """
+        <form action="/sps/login/methods2/sms?bo=SECRET&lang=ru">
+          <input type="hidden" name="csrf" value="SECRET-CSRF">
+          <button type="submit" name="action" value="sendSms">SMS</button>
+          <a href="/sps/login/resend?token=SECRET">Resend</a>
+        </form>
+        """
+
+        summary = _auth_controls_summary(html)
+
+        self.assertIn(
+            {"tag": "form", "action": "/sps/login/methods2/sms",
+             "action_query_keys": "bo,lang"}, summary)
+        self.assertIn({"tag": "input"}, summary)
+        self.assertIn(
+            {"tag": "button", "type": "submit", "name": "action",
+             "value": "sendSms"}, summary)
+        self.assertIn(
+            {"tag": "a", "href": "/sps/login/resend",
+             "href_query_keys": "token"}, summary)
+        self.assertNotIn("SECRET", repr(summary))
 
     def test_404_is_error_not_success(self):
         """Регресс: POST /reading отдавал 404, а код считал это успехом."""

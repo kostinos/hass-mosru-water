@@ -8,6 +8,7 @@ import re
 import time
 import urllib.parse
 from datetime import date, datetime
+from html.parser import HTMLParser
 
 import requests
 
@@ -86,6 +87,39 @@ _RETRY_DELAY       = 5    # пауза между попытками, сек
 
 _TRUSTED_HOSTS = {'login.mos.ru', 'www.mos.ru', 'ed.mos.ru', 'my.mos.ru'}
 _MAX_RESPONSE_BYTES = 2_000_000
+
+
+class _AuthControlsProbe(HTMLParser):
+    """Collect auth control metadata without retaining HTML or secret values."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.controls: list[dict[str, str]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag not in {"form", "input", "button", "a"}:
+            return
+        raw = {key: value or "" for key, value in attrs}
+        item = {"tag": tag}
+        for key in ("type", "name", "value"):
+            # Hidden values include CSRF/state and must never reach logs.
+            if key in raw and not (tag == "input" and raw.get("type") == "hidden"):
+                item[key] = raw[key][:80]
+        for key in ("action", "formaction", "href"):
+            if raw.get(key):
+                parts = urllib.parse.urlsplit(raw[key])
+                query_keys = sorted(urllib.parse.parse_qs(parts.query, keep_blank_values=True))
+                item[key] = parts.path or "/"
+                if query_keys:
+                    item[f"{key}_query_keys"] = ",".join(query_keys)
+        self.controls.append(item)
+
+
+def _auth_controls_summary(html: str) -> list[dict[str, str]]:
+    """Return non-secret form metadata for diagnosing changed mos.ru login steps."""
+    parser = _AuthControlsProbe()
+    parser.feed(html)
+    return parser.controls
 
 
 def trusted_url(value: str, *, qr: bool = False) -> str:
@@ -414,6 +448,10 @@ class MosRuClient:
         if "methods2/sms" in resp.url or "/methods/sms" in resp.url:
             self._sms_page_url = resp.url
             self._sms_form_action, self._sms_hidden = _parse_form(resp.text)
+            _LOGGER.debug(
+                "mos.ru confirmation controls (values redacted): %s",
+                _auth_controls_summary(resp.text),
+            )
             return "sms_required"
         # Аккаунт защищён приложением-аутентификатором: QR подтверждает только
         # первый фактор, SSO-сессия появится после ввода TOTP-кода.
