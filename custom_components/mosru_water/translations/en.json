@@ -7,10 +7,22 @@
       },
       "code": {
         "title": "Login confirmation (2FA)",
-        "description": "Open the **mos.ru** or **Gosuslugi Moscow** app and tap **\"Confirm login\"**.\n\nAfter tapping, you will receive a push notification with a 6-digit code — enter it below.",
+        "description": "Enter the 6-digit confirmation code you received.",
         "data": {
           "sms_code": "Confirmation code"
         }
+      },
+      "delivery": {
+        "title": "Get a confirmation code",
+        "description": "If the code has already arrived, continue to code entry. SMS is requested only after a separate click.",
+        "menu_options": {
+          "code": "Enter received code",
+          "request_sms": "Send code by SMS"
+        }
+      },
+      "request_sms": {
+        "title": "Request code by SMS",
+        "description": "The SMS request failed. The button below retries the request."
       },
       "totp": {
         "title": "Authenticator app code",
@@ -94,7 +106,8 @@
     "error": {
       "entity_not_found": "Sensor not found in Home Assistant",
       "wrong_unit": "Sensor must return a value in m³",
-      "required": "This field is required"
+      "required": "This field is required",
+      "cannot_request_sms": "Could not request a code by SMS. Try again."
     },
     "abort": {
       "logout_failed": "Could not stop the integration. The session was not removed.",
