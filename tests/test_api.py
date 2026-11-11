@@ -480,6 +480,7 @@ class SessionNetworkTest(unittest.TestCase):
 
 
 _TOTP_URL = "https://login.mos.ru/sps/login/methods2/totp?bo=%2Fsps%2Foauth%2Fae"
+_SMS_PAGE_URL = "https://login.mos.ru/sps/login/methods2/sms?bo=%2Fsps%2Foauth%2Fae"
 _TRUST_URL = "https://login.mos.ru/sps/login/ur/askToTrust?bo=%2Fsps%2Foauth%2Fae"
 _SATISFY_URL = "https://www.mos.ru/api/acs/v1/login/satisfy?code=test"
 
@@ -579,6 +580,54 @@ class QrSecondFactorTest(unittest.TestCase):
         with self.assertRaises(MosRuAuthError):
             self.client.submit_totp("123456")
         self.session.post.assert_not_called()
+
+
+class QrSmsSecondFactorTest(unittest.TestCase):
+    """SMS flow must prove that login finished, not merely receive HTTP 200."""
+
+    def setUp(self):
+        self.client = MosRuClient()
+        self.session = mock.Mock()
+        self.session.cookies = []
+        self.client._session = self.session
+        self.client._sms_page_url = _SMS_PAGE_URL
+        self.client._sms_form_action = ""
+        self.client._sms_hidden = {}
+
+    def test_expired_sms_code_stays_on_sms_page(self):
+        # mos.ru returns the form again with HTTP 200 for an invalid/expired code.
+        # This used to be silently accepted as a successful login.
+        self.session.post.return_value = _page(200, _SMS_PAGE_URL)
+
+        with self.assertRaises(MosRuAuthError) as ctx:
+            self.client.submit_sms_and_trust("123456")
+
+        self.assertIn("просроченный", str(ctx.exception))
+
+    def test_sms_cannot_finish_without_session_cookie(self):
+        self.session.post.return_value = _page(200, "https://www.mos.ru/")
+
+        with self.assertRaises(MosRuAuthError) as ctx:
+            self.client.submit_sms_and_trust("123456")
+
+        self.assertIn("Ltpatoken2", str(ctx.exception))
+
+    def test_sms_success_requires_session_cookie(self):
+        cookie = mock.Mock()
+        cookie.name = "Ltpatoken2"
+        self.session.cookies = [cookie]
+        self.session.post.return_value = _page(200, "https://www.mos.ru/")
+
+        self.client.submit_sms_and_trust("123456")
+
+    def test_sms_unknown_login_step_is_not_success(self):
+        self.session.post.return_value = _page(
+            200, "https://login.mos.ru/sps/login/methods/password?bo=%2Fsps")
+
+        with self.assertRaises(MosRuAuthError) as ctx:
+            self.client.submit_sms_and_trust("123456")
+
+        self.assertIn("/sps/login/methods/password", str(ctx.exception))
 
 
 if __name__ == "__main__":

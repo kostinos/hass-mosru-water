@@ -306,7 +306,7 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_code(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Ввод 6-значного кода из пуш-уведомления (2FA)."""
+        """Ввод 6-значного кода подтверждения (2FA)."""
         return await self._async_submit_code(
             "code", self._client.submit_sms_and_trust, user_input
         )

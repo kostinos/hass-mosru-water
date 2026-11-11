@@ -466,7 +466,7 @@ class MosRuClient:
         self._totp_page_url = ""
 
     def submit_sms_and_trust(self, code: str) -> None:
-        """Отправить 6-значный код SMS/пуша и довериться устройству."""
+        """Отправить 6-значный код подтверждения и проверить завершение входа."""
         page_url = getattr(self, "_sms_page_url", "")
         form_action = getattr(self, "_sms_form_action", "")
         hidden = dict(getattr(self, "_sms_hidden", {}))
@@ -497,9 +497,24 @@ class MosRuClient:
         if resp.status_code >= 400:
             raise MosRuAuthError("Неверный SMS-код")
 
+        # Неверный или просроченный код mos.ru отклоняет обычной HTML-страницей
+        # с HTTP 200. Раньше такой ответ считался успехом, config flow сохранял
+        # cookies без Ltpatoken2 и после reload показывал «сессия истекла».
+        if "methods2/sms" in resp.url or "/methods/sms" in resp.url:
+            raise MosRuAuthError("Неверный или просроченный SMS-код")
+
         # Если попали на askToTrust — доверяемся устройству
         if "askToTrust" in resp.url:
             self._trust_device(resp)
+            return
+
+        step = _unfinished_login_step(resp.url)
+        if step:
+            raise MosRuAuthError(f"Вход не завершён: mos.ru запросил шаг {step}")
+
+        cookie_names = {c.name for c in self._session.cookies}
+        if "Ltpatoken2" not in cookie_names:
+            raise MosRuAuthError("Авторизация не завершена: Ltpatoken2 не установлен")
 
     def _trust_device(self, resp: requests.Response) -> None:
         """Ответить «доверять устройству» на странице askToTrust."""
