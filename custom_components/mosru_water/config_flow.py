@@ -32,6 +32,7 @@ from .const import (
     CONF_SESSION_COOKIES,
     UNIT_M3,
 )
+from .entry_identity import entry_title, place_unique_id
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -108,24 +109,12 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @staticmethod
     def _place_unique_id(place: dict) -> str:
         """Вернуть стабильный ID квартиры, не привязанный к профилю mos.ru."""
-        paycode = str(place.get("paycode") or "").strip()
-        flat = str(place.get("flat") or "").strip()
-        if paycode:
-            return f"paycode:{paycode}:flat:{flat}"
-        # У части старых/неполных профилей ЕПД отсутствует. В этом случае
-        # userPlaceId остаётся единственным доступным идентификатором.
-        return f"user-place:{place['user_place_id']}"
+        return place_unique_id(place)
 
     @staticmethod
     def _entry_title(data: dict) -> str:
         """Сделать несколько записей интеграции различимыми в интерфейсе HA."""
-        paycode = str(data.get(CONF_PAYCODE) or "").strip()
-        flat = str(data.get(CONF_FLAT) or "").strip()
-        if paycode and flat:
-            return f"MOS.RU Water Meter · ЕПД {paycode} · кв. {flat}"
-        if paycode:
-            return f"MOS.RU Water Meter · ЕПД {paycode}"
-        return f"MOS.RU Water Meter · {data.get(CONF_USER_PLACE_ID, '')}"
+        return entry_title(data)
 
     async def _async_cleanup_qr(self, url: str | None = None) -> None:
         url = self._qr_url if url is None else url

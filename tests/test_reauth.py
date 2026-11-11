@@ -17,6 +17,12 @@ _spec = importlib.util.spec_from_file_location("mosru_water_api_for_flow", _API_
 api = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(api)
 
+_IDENTITY_PATH = SOURCE.parent / "entry_identity.py"
+_identity_spec = importlib.util.spec_from_file_location(
+    "mosru_water_entry_identity_for_flow", _IDENTITY_PATH)
+identity = importlib.util.module_from_spec(_identity_spec)
+_identity_spec.loader.exec_module(identity)
+
 
 def load_flow_methods():
     # Keep the actual method bodies, replacing only the unavailable HA base class
@@ -53,6 +59,8 @@ def load_flow_methods():
         "pick_counters": api.pick_counters,
         "counters_of_type": api.counters_of_type,
         "place_label": api.place_label,
+        "place_unique_id": identity.place_unique_id,
+        "entry_title": identity.entry_title,
         "COLD_TYPE": api.COLD_TYPE, "HOT_TYPE": api.HOT_TYPE,
         "selector": Mock(),
         "_LOGGER": Mock(),
@@ -254,11 +262,14 @@ class ReauthReloadContractTest(unittest.IsolatedAsyncioTestCase):
         coordinator = SimpleNamespace(async_config_entry_first_refresh=AsyncMock())
         namespace = {'DOMAIN': 'mosru_water', 'PLATFORMS': ['sensor', 'button'],
                      'MosRuWaterCoordinator': Mock(return_value=coordinator),
+                     'legacy_entry_updates': Mock(return_value={}),
                      '_async_register_services': Mock()}
         module = ast.Module(body=[ast.ImportFrom(module='__future__',
                           names=[ast.alias(name='annotations')], level=0), setup], type_ignores=[])
         exec(compile(ast.fix_missing_locations(module), str(source), 'exec'), namespace)
-        entry = SimpleNamespace(entry_id='entry', add_update_listener=Mock(), async_on_unload=Mock())
+        entry = SimpleNamespace(
+            entry_id='entry', title='Custom title', unique_id='existing', data={},
+            add_update_listener=Mock(), async_on_unload=Mock())
         hass = SimpleNamespace(data={}, config_entries=SimpleNamespace(async_forward_entry_setups=AsyncMock()))
         self.assertTrue(await namespace['async_setup_entry'](hass, entry))
         entry.add_update_listener.assert_not_called()
