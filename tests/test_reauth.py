@@ -27,7 +27,7 @@ def load_flow_methods():
              "async_step_qr", "async_step_code", "async_step_totp", "_async_submit_code",
              "async_step_delivery", "async_step_request_sms",
              "async_step_user", "async_step_place", "_load_places", "_async_select_place",
-             "async_step_discover"}
+             "async_step_discover", "_place_unique_id", "_entry_title"}
     names.update({'_async_cleanup_qr', '_qr_finished'})
     cls.bases = []
     cls.keywords = []

@@ -103,14 +103,44 @@ class PlaceStepTest(FlowTestBase):
         self.assertIn("ул. Тестовая, д. 1, кв. 46 — ЕПД 1344364128", labels)
         self.flow.async_step_discover.assert_not_awaited()
 
-    async def test_place_becomes_unique_id(self):
+    async def test_place_becomes_account_independent_unique_id(self):
         self.flow._client.list_places.return_value = [_PLACE_A]
         await self.flow.async_step_place()
-        self.flow.async_set_unique_id.assert_awaited_once_with("3395115")
+        self.flow.async_set_unique_id.assert_awaited_once_with(
+            "paycode:1344364128:flat:46")
         self.flow._abort_if_unique_id_configured.assert_called_once()
-        # Записи без unique_id (созданные раньше) сверяются по data.
+        # Старую запись без unique_id находим даже после смены аккаунта и
+        # связанного с ним userPlaceId.
+        self.flow._async_abort_entries_match.assert_called_once_with(
+            {"paycode": "1344364128", "flat": "46"})
+
+    def test_same_flat_has_same_id_for_another_mosru_profile(self):
+        another_profile = {**_PLACE_A, "user_place_id": "9876543"}
+        self.assertEqual(
+            self.flow._place_unique_id(_PLACE_A),
+            self.flow._place_unique_id(another_profile),
+        )
+
+    async def test_place_without_paycode_falls_back_to_user_place_id(self):
+        place = {**_PLACE_A, "paycode": "", "flat": ""}
+        self.flow._client.list_places.return_value = [place]
+        await self.flow.async_step_place()
+        self.flow.async_set_unique_id.assert_awaited_once_with(
+            "user-place:3395115")
         self.flow._async_abort_entries_match.assert_called_once_with(
             {"user_place_id": "3395115"})
+
+    def test_entry_titles_distinguish_flats(self):
+        self.assertEqual(
+            self.flow._entry_title(_PLACE_A),
+            "MOS.RU Water Meter · ЕПД 1344364128 · кв. 46",
+        )
+        self.assertEqual(
+            self.flow._entry_title({
+                "user_place_id": "777", "paycode": "", "flat": "",
+            }),
+            "MOS.RU Water Meter · 777",
+        )
 
     async def test_already_added_place_stops_wizard(self):
         class AbortFlow(Exception): pass

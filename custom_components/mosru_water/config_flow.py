@@ -105,6 +105,28 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._qr_link: str = ""
         self._reauth_entry: config_entries.ConfigEntry | None = None
 
+    @staticmethod
+    def _place_unique_id(place: dict) -> str:
+        """Вернуть стабильный ID квартиры, не привязанный к профилю mos.ru."""
+        paycode = str(place.get("paycode") or "").strip()
+        flat = str(place.get("flat") or "").strip()
+        if paycode:
+            return f"paycode:{paycode}:flat:{flat}"
+        # У части старых/неполных профилей ЕПД отсутствует. В этом случае
+        # userPlaceId остаётся единственным доступным идентификатором.
+        return f"user-place:{place['user_place_id']}"
+
+    @staticmethod
+    def _entry_title(data: dict) -> str:
+        """Сделать несколько записей интеграции различимыми в интерфейсе HA."""
+        paycode = str(data.get(CONF_PAYCODE) or "").strip()
+        flat = str(data.get(CONF_FLAT) or "").strip()
+        if paycode and flat:
+            return f"MOS.RU Water Meter · ЕПД {paycode} · кв. {flat}"
+        if paycode:
+            return f"MOS.RU Water Meter · ЕПД {paycode}"
+        return f"MOS.RU Water Meter · {data.get(CONF_USER_PLACE_ID, '')}"
+
     async def _async_cleanup_qr(self, url: str | None = None) -> None:
         url = self._qr_url if url is None else url
         if self._qr_url == url:
@@ -440,11 +462,19 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Запомнить квартиру: по userPlaceId идут все запросы к ed.mos.ru,
         paycode и flat нужны имени устройства и повторному поиску после выхода.
 
-        Одна запись на квартиру: unique_id — userPlaceId. Записи, созданные до
-        появления unique_id, ловит сверка с data."""
-        await self.async_set_unique_id(place["user_place_id"])
+        Одна запись на квартиру: при наличии ЕПД стабильный unique_id не зависит от
+        аккаунта mos.ru. Записи без unique_id ловит сверка с data."""
+        await self.async_set_unique_id(self._place_unique_id(place))
         self._abort_if_unique_id_configured()
-        self._async_abort_entries_match({CONF_USER_PLACE_ID: place["user_place_id"]})
+        if place.get("paycode"):
+            self._async_abort_entries_match({
+                CONF_PAYCODE: str(place["paycode"]),
+                CONF_FLAT: str(place.get("flat") or ""),
+            })
+        else:
+            self._async_abort_entries_match({
+                CONF_USER_PLACE_ID: place["user_place_id"],
+            })
         self._data[CONF_USER_PLACE_ID] = place["user_place_id"]
         self._data[CONF_PAYCODE] = place["paycode"]
         self._data[CONF_FLAT] = place["flat"]
@@ -578,7 +608,7 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not errors:
                 self._data.update(user_input)
                 return self.async_create_entry(
-                    title="MOS.RU Water Meter",
+                    title=self._entry_title(self._data),
                     data=self._data,
                 )
 
