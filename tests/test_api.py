@@ -32,6 +32,7 @@ MosRuAuthError = api.MosRuAuthError
 MosRuClient = api.MosRuClient
 MosRuTemporaryError = api.MosRuTemporaryError
 _parse_api_response = api._parse_api_response
+_parse_form = api._parse_form
 _period_end_of_month = api._period_end_of_month
 _auth_controls_summary = api._auth_controls_summary
 
@@ -619,6 +620,76 @@ class QrSmsSecondFactorTest(unittest.TestCase):
         self.client._sms_page_url = _SMS_PAGE_URL
         self.client._sms_form_action = ""
         self.client._sms_hidden = {}
+
+    def test_sms_fallback_form_is_saved_but_not_submitted_after_qr(self):
+        html = """
+        <form action="/sps/login/methods/sms?bo=state" method="POST">
+          <input name="csrf" type="hidden" value="code-token">
+        </form>
+        <form id="resendBysms" action="/sps/login/methods/sms/resend?bo=state"
+              method="POST">
+          <input name="channel" type="hidden" value="sms">
+          <button type="submit">Отправить код по SMS</button>
+        </form>
+        """
+        self.session.post.return_value = _page(200, _SMS_PAGE_URL, text=html)
+
+        self.assertEqual(self.client.complete_qr_auth(), "sms_required")
+
+        self.session.post.assert_called_once()
+        self.assertEqual(
+            self.client._sms_resend_action,
+            "/sps/login/methods/sms/resend?bo=state",
+        )
+        self.assertEqual(self.client._sms_resend_hidden, {"channel": "sms"})
+        self.assertFalse(getattr(self.client, "_sms_resend_requested", False))
+
+    def test_sms_fallback_is_only_requested_once(self):
+        html = """
+        <form id="resendBysms" action="/sps/login/methods/sms/resend?bo=state"
+              method="POST">
+          <input name="channel" type="hidden" value="sms">
+        </form>
+        """
+        self.client._sms_resend_action, self.client._sms_resend_hidden = (
+            _parse_form(html, form_id="resendBysms")
+        )
+        self.session.post.return_value = _page(200, _SMS_PAGE_URL, text=html)
+
+        self.client.request_sms_code()
+        self.client.request_sms_code()
+
+        self.session.post.assert_called_once()
+
+    def test_sms_fallback_rejects_external_action(self):
+        html = """
+        <form id="resendBysms" action="https://evil.example/resend" method="POST">
+          <input name="channel" type="hidden" value="sms">
+        </form>
+        """
+        self.client._sms_resend_action, self.client._sms_resend_hidden = (
+            _parse_form(html, form_id="resendBysms")
+        )
+
+        with self.assertRaises(MosRuApiError):
+            self.client.request_sms_code()
+
+        self.session.post.assert_not_called()
+
+    def test_sms_fallback_requires_sms_channel(self):
+        html = """
+        <form id="resendBysms" action="/sps/login/methods/sms/resend" method="POST">
+          <input name="channel" type="hidden" value="push">
+        </form>
+        """
+        self.client._sms_resend_action, self.client._sms_resend_hidden = (
+            _parse_form(html, form_id="resendBysms")
+        )
+
+        with self.assertRaises(MosRuAuthError):
+            self.client.request_sms_code()
+
+        self.session.post.assert_not_called()
 
     def test_expired_sms_code_stays_on_sms_page(self):
         # mos.ru returns the form again with HTTP 200 for an invalid/expired code.

@@ -203,14 +203,14 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             pn_create(
                 self.hass,
                 message=(
-                    "Подтвердите вход в приложении mos.ru, затем введите "
-                    "код из пуш-уведомления в Home Assistant.\n\n"
+                    "QR-вход подтверждён. Введите полученный код или запросите "
+                    "его по SMS в Home Assistant.\n\n"
                     f"[Продолжить авторизацию]({_AUTH_SETTINGS_URL})"
                 ),
                 title="MOS.RU Water: Подтверждение входа",
                 notification_id="mosru_water_qr",
             )
-            return self.async_show_progress_done(next_step_id="code")
+            return self.async_show_progress_done(next_step_id="delivery")
 
         if not result:
             # QR истёк или ошибка — начать заново со свежей сессией
@@ -302,6 +302,28 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return False  # таймаут
 
     # ── Шаг 3: ввод 6-значного 2FA-кода ─────────────────────────────────
+
+    async def async_step_delivery(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Выбрать ввод уже полученного кода или явный запрос SMS."""
+        return self.async_show_menu(
+            step_id="delivery", menu_options=["code", "request_sms"]
+        )
+
+    async def async_step_request_sms(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Запросить SMS только после отдельного нажатия пользователя."""
+        try:
+            await self.hass.async_add_executor_job(self._client.request_sms_code)
+        except (MosRuAuthError, MosRuApiError):
+            return self.async_show_form(
+                step_id="request_sms",
+                data_schema=vol.Schema({}),
+                errors={"base": "cannot_request_sms"},
+            )
+        return await self.async_step_code()
 
     async def async_step_code(
         self, user_input: dict[str, Any] | None = None
