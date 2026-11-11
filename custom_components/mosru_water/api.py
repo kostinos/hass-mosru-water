@@ -685,6 +685,25 @@ class MosRuClient:
         При живом Ltpatoken2 OAuth проходит молча: login.mos.ru редиректит на
         callback с ?code=, который обменивается на сессионную cookie ed.mos.ru.
         Дальше все запросы к API идут по cookies, без токенов в query.
+
+        Если ed.mos.ru отклонил обмен кода, а у нас были его прежние cookies,
+        вход повторяется один раз без них. Так бывает после перезапуска HA:
+        restore_session() поднимает cookies ed.mos.ru (Authorization, Refresh)
+        вместе с SSO, а они живут около часа и к этому времени уже истекли —
+        с ними ed.mos.ru отвечает 401, хотя сама сессия mos.ru жива и повторный
+        вход по QR не нужен.
+        """
+        status = self._exchange_ed_code()
+        if status in (401, 403) and self._drop_ed_cookies():
+            _LOGGER.info("ed.mos.ru отклонил устаревшие cookies; повторяем вход без них")
+            status = self._exchange_ed_code()
+        if status in (401, 403):
+            raise MosRuAuthError("ed.mos.ru отклонил авторизацию")
+
+    def _exchange_ed_code(self) -> int:
+        """Пройти OAuth ed.mos.ru и обменять code на сессию; вернуть HTTP-статус обмена.
+
+        401/403 возвращаются вызывающему: решать, повторять ли, — ему.
         """
         try:
             resp = self._session.get(
@@ -716,10 +735,19 @@ class MosRuClient:
 
         if auth.status_code in _TRANSIENT_STATUS:
             raise MosRuTemporaryError(f"ed.mos.ru auth: HTTP {auth.status_code}")
-        if auth.status_code in (401, 403):
-            raise MosRuAuthError("ed.mos.ru отклонил авторизацию")
-        if not auth.ok:
+        if auth.status_code not in (401, 403) and not auth.ok:
             raise MosRuApiError(f"ed.mos.ru auth: HTTP {auth.status_code}")
+        return auth.status_code
+
+    def _drop_ed_cookies(self) -> bool:
+        """Удалить cookies ed.mos.ru, оставив SSO mos.ru; True, если было что удалять."""
+        stale = [
+            c for c in self._session.cookies
+            if (c.domain or "").lstrip(".") == "ed.mos.ru"
+        ]
+        for c in stale:
+            self._session.cookies.clear(c.domain, c.path, c.name)
+        return bool(stale)
 
     def _counters_payload(self, user_place_id: str) -> list[dict]:
         """Сырой ответ listByPayerCode: список квартир со счётчиками."""
