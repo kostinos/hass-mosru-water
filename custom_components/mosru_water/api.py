@@ -8,6 +8,7 @@ import re
 import time
 import urllib.parse
 from datetime import date, datetime
+from html.parser import HTMLParser
 
 import requests
 
@@ -88,6 +89,39 @@ _TRUSTED_HOSTS = {'login.mos.ru', 'www.mos.ru', 'ed.mos.ru', 'my.mos.ru'}
 _MAX_RESPONSE_BYTES = 2_000_000
 
 
+class _AuthControlsProbe(HTMLParser):
+    """Collect auth control metadata without retaining HTML or secret values."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.controls: list[dict[str, str]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag not in {"form", "input", "button", "a"}:
+            return
+        raw = {key: value or "" for key, value in attrs}
+        item = {"tag": tag}
+        for key in ("type", "name", "value"):
+            # Hidden values include CSRF/state and must never reach logs.
+            if key in raw and not (tag == "input" and raw.get("type") == "hidden"):
+                item[key] = raw[key][:80]
+        for key in ("action", "formaction", "href"):
+            if raw.get(key):
+                parts = urllib.parse.urlsplit(raw[key])
+                query_keys = sorted(urllib.parse.parse_qs(parts.query, keep_blank_values=True))
+                item[key] = parts.path or "/"
+                if query_keys:
+                    item[f"{key}_query_keys"] = ",".join(query_keys)
+        self.controls.append(item)
+
+
+def _auth_controls_summary(html: str) -> list[dict[str, str]]:
+    """Return non-secret form metadata for diagnosing changed mos.ru login steps."""
+    parser = _AuthControlsProbe()
+    parser.feed(html)
+    return parser.controls
+
+
 def trusted_url(value: str, *, qr: bool = False) -> str:
     """Reject external origins before following redirects or publishing QR links."""
     parts = urllib.parse.urlsplit(value)
@@ -149,23 +183,40 @@ def _period_end_of_month(today: date | None = None) -> str:
     return day.replace(day=last).isoformat()
 
 
-def _parse_form(html: str) -> tuple[str, dict]:
-    """Извлечь action формы и скрытые поля из HTML."""
-    action = ""
-    action_m = re.search(r'<form[^>]+action=["\']([^"\']+)["\']', html, re.IGNORECASE)
-    if action_m:
-        action = action_m.group(1)
-    hidden: dict[str, str] = {}
-    for inp in re.finditer(r'<input([^>]+)>', html, re.IGNORECASE):
-        attrs = inp.group(1)
-        type_m = re.search(r'type=["\'](\w+)["\']', attrs, re.IGNORECASE)
-        if not type_m or type_m.group(1).lower() != "hidden":
-            continue
-        name_m = re.search(r'name=["\']([^"\']+)["\']', attrs)
-        value_m = re.search(r'value=["\']([^"\']*)["\']', attrs)
-        if name_m:
-            hidden[name_m.group(1)] = value_m.group(1) if value_m else ""
-    return action, hidden
+class _FormParser(HTMLParser):
+    """Extract one form and its hidden inputs from login.mos.ru HTML."""
+
+    def __init__(self, form_id: str | None = None) -> None:
+        super().__init__()
+        self.form_id = form_id
+        self.action = ""
+        self.hidden: dict[str, str] = {}
+        self._active = False
+        self._found = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = {key: value or "" for key, value in attrs}
+        if tag == "form" and not self._found:
+            if self.form_id is None or values.get("id") == self.form_id:
+                self._active = True
+                self._found = True
+                self.action = values.get("action", "")
+            return
+        if tag != "input" or not self._active or values.get("type", "").lower() != "hidden":
+            return
+        if values.get("name"):
+            self.hidden[values["name"]] = values.get("value", "")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "form" and self._active:
+            self._active = False
+
+
+def _parse_form(html: str, *, form_id: str | None = None) -> tuple[str, dict]:
+    """Extract action and hidden fields from the first or a named form."""
+    parser = _FormParser(form_id)
+    parser.feed(html)
+    return parser.action, parser.hidden
 
 
 # Тип счётчика в ответе ed.mos.ru (поле typeName).
@@ -414,6 +465,13 @@ class MosRuClient:
         if "methods2/sms" in resp.url or "/methods/sms" in resp.url:
             self._sms_page_url = resp.url
             self._sms_form_action, self._sms_hidden = _parse_form(resp.text)
+            self._sms_resend_action, self._sms_resend_hidden = _parse_form(
+                resp.text, form_id="resendBysms"
+            )
+            _LOGGER.debug(
+                "mos.ru confirmation controls (values redacted): %s",
+                _auth_controls_summary(resp.text),
+            )
             return "sms_required"
         # Аккаунт защищён приложением-аутентификатором: QR подтверждает только
         # первый фактор, SSO-сессия появится после ввода TOTP-кода.
@@ -427,6 +485,51 @@ class MosRuClient:
         if step:
             raise MosRuAuthError(f"Вход не завершён: mos.ru запросил шаг {step}")
         return "done"
+
+    def request_sms_code(self) -> None:
+        """Submit mos.ru's official fallback form after explicit user action."""
+        if getattr(self, "_sms_resend_requested", False):
+            return
+        action = getattr(self, "_sms_resend_action", "")
+        hidden = dict(getattr(self, "_sms_resend_hidden", {}))
+        if not action:
+            raise MosRuAuthError("mos.ru не предоставил форму запроса SMS-кода")
+        if hidden.get("channel") != "sms":
+            raise MosRuAuthError("Некорректная форма запроса SMS-кода")
+
+        page_url = getattr(self, "_sms_page_url", "")
+        sms_url = urllib.parse.urljoin(page_url, action)
+        trusted_url(sms_url)
+        try:
+            response = self._session.post(
+                sms_url,
+                data=hidden,
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Referer": page_url,
+                    "Origin": "https://login.mos.ru",
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "same-origin",
+                    "Sec-Fetch-User": "?1",
+                },
+                allow_redirects=True,
+                timeout=_TIMEOUT,
+            )
+        except requests.RequestException as err:
+            raise MosRuApiError("Не удалось запросить SMS-код") from err
+        if response.status_code in _TRANSIENT_STATUS:
+            raise MosRuTemporaryError(
+                f"Запрос SMS-кода временно недоступен: HTTP {response.status_code}"
+            )
+        if response.status_code >= 400:
+            raise MosRuAuthError(
+                f"mos.ru отклонил запрос SMS-кода: HTTP {response.status_code}"
+            )
+
+        self._sms_resend_requested = True
+        self._sms_page_url = response.url
+        self._sms_form_action, self._sms_hidden = _parse_form(response.text)
 
     def submit_totp(self, code: str) -> None:
         """Отправить код из приложения-аутентификатора после QR-входа."""
@@ -466,7 +569,7 @@ class MosRuClient:
         self._totp_page_url = ""
 
     def submit_sms_and_trust(self, code: str) -> None:
-        """Отправить 6-значный код SMS/пуша и довериться устройству."""
+        """Отправить 6-значный код подтверждения и проверить завершение входа."""
         page_url = getattr(self, "_sms_page_url", "")
         form_action = getattr(self, "_sms_form_action", "")
         hidden = dict(getattr(self, "_sms_hidden", {}))
@@ -497,9 +600,24 @@ class MosRuClient:
         if resp.status_code >= 400:
             raise MosRuAuthError("Неверный SMS-код")
 
+        # Неверный или просроченный код mos.ru отклоняет обычной HTML-страницей
+        # с HTTP 200. Раньше такой ответ считался успехом, config flow сохранял
+        # cookies без Ltpatoken2 и после reload показывал «сессия истекла».
+        if "methods2/sms" in resp.url or "/methods/sms" in resp.url:
+            raise MosRuAuthError("Неверный или просроченный SMS-код")
+
         # Если попали на askToTrust — доверяемся устройству
         if "askToTrust" in resp.url:
             self._trust_device(resp)
+            return
+
+        step = _unfinished_login_step(resp.url)
+        if step:
+            raise MosRuAuthError(f"Вход не завершён: mos.ru запросил шаг {step}")
+
+        cookie_names = {c.name for c in self._session.cookies}
+        if "Ltpatoken2" not in cookie_names:
+            raise MosRuAuthError("Авторизация не завершена: Ltpatoken2 не установлен")
 
     def _trust_device(self, resp: requests.Response) -> None:
         """Ответить «доверять устройству» на странице askToTrust."""

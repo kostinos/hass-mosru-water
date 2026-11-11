@@ -25,6 +25,7 @@ def load_flow_methods():
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef))
     names = {"__init__", "async_step_reauth", "_notify_qr_auth", "_poll_qr_scan",
              "async_step_qr", "async_step_code", "async_step_totp", "_async_submit_code",
+             "async_step_delivery", "async_step_request_sms",
              "async_step_user", "async_step_place", "_load_places", "_async_select_place",
              "async_step_discover"}
     names.update({'_async_cleanup_qr', '_qr_finished'})
@@ -86,6 +87,7 @@ class ReauthTest(unittest.IsolatedAsyncioTestCase):
         self.flow.context = {"entry_id": "entry"}
         self.flow.async_show_form = Mock(return_value={"type": "form"})
         self.flow.async_show_progress = Mock(return_value={"type": "progress"})
+        self.flow.async_show_menu = Mock(return_value={"type": "menu"})
         self.flow.async_update_reload_and_abort = Mock(return_value={"type": "abort"})
         self.flow.async_abort = Mock()
         self.flow._async_in_progress = Mock(return_value=[])
@@ -142,12 +144,28 @@ class ReauthTest(unittest.IsolatedAsyncioTestCase):
         self.flow._qr_task.set_result("code_required")
         self.flow.async_show_progress_done = Mock()
         await self.flow.async_step_qr()
-        self.flow.async_show_progress_done.assert_called_once_with(next_step_id="code")
+        self.flow.async_show_progress_done.assert_called_once_with(next_step_id="delivery")
         self.ns["pn_dismiss"].assert_not_called()
         self.assertIn(
             "[Продолжить авторизацию](/config/integrations/integration/mosru_water)",
             self.ns["pn_create"].call_args.kwargs["message"],
         )
+
+    async def test_delivery_menu_keeps_sms_explicit(self):
+        result = await self.flow.async_step_delivery()
+
+        self.assertEqual(result, {"type": "menu"})
+        self.flow.async_show_menu.assert_called_once_with(
+            step_id="delivery", menu_options=["code", "request_sms"]
+        )
+
+    async def test_request_sms_then_opens_code_form(self):
+        self.flow._client = Mock()
+
+        await self.flow.async_step_request_sms()
+
+        self.flow._client.request_sms_code.assert_called_once_with()
+        self.assertEqual(self.flow.async_show_form.call_args.kwargs["step_id"], "code")
 
     async def test_qr_success_updates_and_reloads_existing_entry(self):
         self.flow._reauth_entry = self.entry

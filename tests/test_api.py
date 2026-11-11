@@ -32,7 +32,9 @@ MosRuAuthError = api.MosRuAuthError
 MosRuClient = api.MosRuClient
 MosRuTemporaryError = api.MosRuTemporaryError
 _parse_api_response = api._parse_api_response
+_parse_form = api._parse_form
 _period_end_of_month = api._period_end_of_month
+_auth_controls_summary = api._auth_controls_summary
 
 
 class FakeResponse:
@@ -87,6 +89,31 @@ class ParseResponseTest(unittest.TestCase):
         resp = FakeResponse(400, {"code": 400, "error": "Показание за данный период уже внесено."})
         with self.assertRaises(MosRuAlreadySubmittedError):
             _parse_api_response(resp)
+
+
+class AuthControlsProbeTest(unittest.TestCase):
+    def test_reports_control_shape_without_hidden_values_or_query_values(self):
+        html = """
+        <form action="/sps/login/methods2/sms?bo=SECRET&lang=ru">
+          <input type="hidden" name="csrf" value="SECRET-CSRF">
+          <button type="submit" name="action" value="sendSms">SMS</button>
+          <a href="/sps/login/resend?token=SECRET">Resend</a>
+        </form>
+        """
+
+        summary = _auth_controls_summary(html)
+
+        self.assertIn(
+            {"tag": "form", "action": "/sps/login/methods2/sms",
+             "action_query_keys": "bo,lang"}, summary)
+        self.assertIn({"tag": "input"}, summary)
+        self.assertIn(
+            {"tag": "button", "type": "submit", "name": "action",
+             "value": "sendSms"}, summary)
+        self.assertIn(
+            {"tag": "a", "href": "/sps/login/resend",
+             "href_query_keys": "token"}, summary)
+        self.assertNotIn("SECRET", repr(summary))
 
     def test_404_is_error_not_success(self):
         """Регресс: POST /reading отдавал 404, а код считал это успехом."""
@@ -480,6 +507,7 @@ class SessionNetworkTest(unittest.TestCase):
 
 
 _TOTP_URL = "https://login.mos.ru/sps/login/methods2/totp?bo=%2Fsps%2Foauth%2Fae"
+_SMS_PAGE_URL = "https://login.mos.ru/sps/login/methods2/sms?bo=%2Fsps%2Foauth%2Fae"
 _TRUST_URL = "https://login.mos.ru/sps/login/ur/askToTrust?bo=%2Fsps%2Foauth%2Fae"
 _SATISFY_URL = "https://www.mos.ru/api/acs/v1/login/satisfy?code=test"
 
@@ -579,6 +607,124 @@ class QrSecondFactorTest(unittest.TestCase):
         with self.assertRaises(MosRuAuthError):
             self.client.submit_totp("123456")
         self.session.post.assert_not_called()
+
+
+class QrSmsSecondFactorTest(unittest.TestCase):
+    """SMS flow must prove that login finished, not merely receive HTTP 200."""
+
+    def setUp(self):
+        self.client = MosRuClient()
+        self.session = mock.Mock()
+        self.session.cookies = []
+        self.client._session = self.session
+        self.client._sms_page_url = _SMS_PAGE_URL
+        self.client._sms_form_action = ""
+        self.client._sms_hidden = {}
+
+    def test_sms_fallback_form_is_saved_but_not_submitted_after_qr(self):
+        html = """
+        <form action="/sps/login/methods/sms?bo=state" method="POST">
+          <input name="csrf" type="hidden" value="code-token">
+        </form>
+        <form id="resendBysms" action="/sps/login/methods/sms/resend?bo=state"
+              method="POST">
+          <input name="channel" type="hidden" value="sms">
+          <button type="submit">Отправить код по SMS</button>
+        </form>
+        """
+        self.session.post.return_value = _page(200, _SMS_PAGE_URL, text=html)
+
+        self.assertEqual(self.client.complete_qr_auth(), "sms_required")
+
+        self.session.post.assert_called_once()
+        self.assertEqual(
+            self.client._sms_resend_action,
+            "/sps/login/methods/sms/resend?bo=state",
+        )
+        self.assertEqual(self.client._sms_resend_hidden, {"channel": "sms"})
+        self.assertFalse(getattr(self.client, "_sms_resend_requested", False))
+
+    def test_sms_fallback_is_only_requested_once(self):
+        html = """
+        <form id="resendBysms" action="/sps/login/methods/sms/resend?bo=state"
+              method="POST">
+          <input name="channel" type="hidden" value="sms">
+        </form>
+        """
+        self.client._sms_resend_action, self.client._sms_resend_hidden = (
+            _parse_form(html, form_id="resendBysms")
+        )
+        self.session.post.return_value = _page(200, _SMS_PAGE_URL, text=html)
+
+        self.client.request_sms_code()
+        self.client.request_sms_code()
+
+        self.session.post.assert_called_once()
+
+    def test_sms_fallback_rejects_external_action(self):
+        html = """
+        <form id="resendBysms" action="https://evil.example/resend" method="POST">
+          <input name="channel" type="hidden" value="sms">
+        </form>
+        """
+        self.client._sms_resend_action, self.client._sms_resend_hidden = (
+            _parse_form(html, form_id="resendBysms")
+        )
+
+        with self.assertRaises(MosRuApiError):
+            self.client.request_sms_code()
+
+        self.session.post.assert_not_called()
+
+    def test_sms_fallback_requires_sms_channel(self):
+        html = """
+        <form id="resendBysms" action="/sps/login/methods/sms/resend" method="POST">
+          <input name="channel" type="hidden" value="push">
+        </form>
+        """
+        self.client._sms_resend_action, self.client._sms_resend_hidden = (
+            _parse_form(html, form_id="resendBysms")
+        )
+
+        with self.assertRaises(MosRuAuthError):
+            self.client.request_sms_code()
+
+        self.session.post.assert_not_called()
+
+    def test_expired_sms_code_stays_on_sms_page(self):
+        # mos.ru returns the form again with HTTP 200 for an invalid/expired code.
+        # This used to be silently accepted as a successful login.
+        self.session.post.return_value = _page(200, _SMS_PAGE_URL)
+
+        with self.assertRaises(MosRuAuthError) as ctx:
+            self.client.submit_sms_and_trust("123456")
+
+        self.assertIn("просроченный", str(ctx.exception))
+
+    def test_sms_cannot_finish_without_session_cookie(self):
+        self.session.post.return_value = _page(200, "https://www.mos.ru/")
+
+        with self.assertRaises(MosRuAuthError) as ctx:
+            self.client.submit_sms_and_trust("123456")
+
+        self.assertIn("Ltpatoken2", str(ctx.exception))
+
+    def test_sms_success_requires_session_cookie(self):
+        cookie = mock.Mock()
+        cookie.name = "Ltpatoken2"
+        self.session.cookies = [cookie]
+        self.session.post.return_value = _page(200, "https://www.mos.ru/")
+
+        self.client.submit_sms_and_trust("123456")
+
+    def test_sms_unknown_login_step_is_not_success(self):
+        self.session.post.return_value = _page(
+            200, "https://login.mos.ru/sps/login/methods/password?bo=%2Fsps")
+
+        with self.assertRaises(MosRuAuthError) as ctx:
+            self.client.submit_sms_and_trust("123456")
+
+        self.assertIn("/sps/login/methods/password", str(ctx.exception))
 
 
 if __name__ == "__main__":
