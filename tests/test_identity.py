@@ -66,6 +66,14 @@ class PlaceIdentityTest(unittest.TestCase):
             identity.places_match(new, {}, right_unique_id="profile")
         )
 
+    def test_prefixed_profile_alias_from_pr9_matches_raw_profile_id(self):
+        new = {"user_place_id": "profile"}
+        self.assertTrue(
+            identity.places_match(
+                new, {}, right_unique_id="user-place:profile"
+            )
+        )
+
     def test_stable_id_alias_detects_logged_out_entry(self):
         data = {"paycode": "123", "flat": "46"}
         self.assertTrue(
@@ -116,7 +124,7 @@ def load_migration():
         name: getattr(identity, name)
         for name in (
             "is_generated_legacy_title",
-            "place_unique_id",
+            "migrated_unique_id",
             "places_match",
             "place_title",
         )
@@ -198,6 +206,12 @@ class EntryMigrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.entry.title, "MOS.RU Water Meter · ЕПД 001234 · кв. 46"
         )
+
+    async def test_migrates_logged_out_prefixed_profile_fallback(self):
+        self.entry.data = {"session_cookies": {}}
+        self.entry.unique_id = "user-place:old-profile"
+        self.assertTrue(await self.migrate(self.hass, self.entry))
+        self.assertEqual(self.entry.unique_id, "old-profile")
 
     async def test_migrates_logged_out_legacy_without_network(self):
         self.entry.data.pop("user_place_id")

@@ -158,6 +158,14 @@ class PlaceStepTest(FlowTestBase):
             _PLACE_B | {"paycode": "", "flat": ""})
         self.flow.async_abort.assert_called_once_with(reason="already_configured")
 
+    async def test_logged_out_pr9_prefixed_fallback_is_rejected(self):
+        self.flow._async_current_entries.return_value = [SimpleNamespace(
+            data={"session_cookies": {}}, unique_id="user-place:999001")]
+        await self.flow._async_select_place(
+            _PLACE_B | {"paycode": "", "flat": ""})
+        self.flow.async_abort.assert_called_once_with(reason="already_configured")
+        self.flow.async_step_discover.assert_not_awaited()
+
     async def test_empty_legacy_record_does_not_match_every_flat(self):
         self.flow._async_current_entries.return_value = [
             SimpleNamespace(data={"paycode": "", "flat": ""}, unique_id=None)]

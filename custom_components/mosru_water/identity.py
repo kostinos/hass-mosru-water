@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import Any
 
 DEFAULT_ENTRY_TITLE = "MOS.RU Water Meter"
+LEGACY_PROFILE_PREFIX = "user-place:"
 
 
 def _text(value: Any) -> str:
@@ -23,17 +24,41 @@ def place_unique_id(data: Mapping[str, Any]) -> str | None:
     return _text(data.get("user_place_id")) or None
 
 
+def unique_id_aliases(unique_id: str | None) -> set[str]:
+    """Return canonical aliases for IDs emitted by previous releases."""
+    value = _text(unique_id)
+    if not value:
+        return set()
+    aliases = {value}
+    if value.startswith(LEGACY_PROFILE_PREFIX) and (
+        profile_id := value.removeprefix(LEGACY_PROFILE_PREFIX)
+    ):
+        aliases.add(profile_id)
+    return aliases
+
+
+def migrated_unique_id(
+    data: Mapping[str, Any], current_unique_id: str | None
+) -> str | None:
+    """Choose the current ID, normalizing the temporary prefixed fallback."""
+    if unique_id := place_unique_id(data):
+        return unique_id
+    if current_unique_id and current_unique_id.startswith(LEGACY_PROFILE_PREFIX):
+        return current_unique_id.removeprefix(LEGACY_PROFILE_PREFIX) or None
+    return _text(current_unique_id) or None
+
+
 def _place_keys(data: Mapping[str, Any], unique_id: str | None) -> set[str]:
     """Return stable and legacy aliases available for duplicate detection."""
-    return {
+    keys = {
         key
         for key in (
             place_unique_id(data),
             _text(data.get("user_place_id")),
-            unique_id,
         )
         if key
     }
+    return keys | unique_id_aliases(unique_id)
 
 
 def places_match(

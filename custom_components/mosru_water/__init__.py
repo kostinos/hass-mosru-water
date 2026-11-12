@@ -16,8 +16,8 @@ from .const import DOMAIN
 from .coordinator import MosRuWaterCoordinator
 from .identity import (
     is_generated_legacy_title,
+    migrated_unique_id,
     place_title,
-    place_unique_id,
     places_match,
 )
 
@@ -59,7 +59,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return False
 
     updates: dict[str, Any] = {"minor_version": 2}
-    if unique_id := place_unique_id(entry.data):
+    if unique_id := migrated_unique_id(entry.data, entry.unique_id):
         updates["unique_id"] = unique_id
     if is_generated_legacy_title(entry.title, entry.data):
         updates["title"] = place_title(entry.data)
