@@ -715,7 +715,21 @@ class QrSmsSecondFactorTest(unittest.TestCase):
         self.session.cookies = [cookie]
         self.session.post.return_value = _page(200, "https://www.mos.ru/")
 
+        self.client._sms_form_action = "/sps/login/methods/sms?bo=test-state"
+        self.client._sms_hidden = {"csrf": "test-token"}
+
         self.client.submit_sms_and_trust("123456")
+
+        self.session.post.assert_called_once_with(
+            "https://login.mos.ru/sps/login/methods/sms?bo=test-state",
+            data={"csrf": "test-token", "sms-code": "123456"},
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Referer": _SMS_PAGE_URL,
+            },
+            allow_redirects=True,
+            timeout=api._TIMEOUT,
+        )
 
     def test_sms_unknown_login_step_is_not_success(self):
         self.session.post.return_value = _page(
