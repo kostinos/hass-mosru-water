@@ -17,9 +17,9 @@ _spec = importlib.util.spec_from_file_location("mosru_water_api_for_flow", _API_
 api = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(api)
 
-_IDENTITY_PATH = SOURCE.parent / "entry_identity.py"
+_IDENTITY_PATH = SOURCE.parent / "identity.py"
 _identity_spec = importlib.util.spec_from_file_location(
-    "mosru_water_entry_identity_for_flow", _IDENTITY_PATH)
+    "mosru_water_identity_for_flow", _IDENTITY_PATH)
 identity = importlib.util.module_from_spec(_identity_spec)
 _identity_spec.loader.exec_module(identity)
 
@@ -33,7 +33,7 @@ def load_flow_methods():
              "async_step_qr", "async_step_code", "async_step_totp", "_async_submit_code",
              "async_step_delivery", "async_step_request_sms",
              "async_step_user", "async_step_place", "_load_places", "_async_select_place",
-             "async_step_discover", "_place_unique_id", "_entry_title"}
+             "async_step_discover", "async_step_sensors"}
     names.update({'_async_cleanup_qr', '_qr_finished'})
     cls.bases = []
     cls.keywords = []
@@ -56,11 +56,15 @@ def load_flow_methods():
         "CONF_PAYCODE": "paycode", "CONF_FLAT": "flat",
         "CONF_USER_PLACE_ID": "user_place_id",
         "CONF_COLD_ID": "cold_counter_id", "CONF_HOT_ID": "hot_counter_id",
+        "CONF_COLD_ENTITY": "cold_entity", "CONF_HOT_ENTITY": "hot_entity",
+        "CONF_SUBMIT_DAY": "submit_day",
+        "_validate_sensor": lambda hass, entity_id: None,
         "pick_counters": api.pick_counters,
         "counters_of_type": api.counters_of_type,
         "place_label": api.place_label,
         "place_unique_id": identity.place_unique_id,
-        "entry_title": identity.entry_title,
+        "places_match": identity.places_match,
+        "place_title": identity.place_title,
         "COLD_TYPE": api.COLD_TYPE, "HOT_TYPE": api.HOT_TYPE,
         "selector": Mock(),
         "_LOGGER": Mock(),
@@ -262,7 +266,6 @@ class ReauthReloadContractTest(unittest.IsolatedAsyncioTestCase):
         coordinator = SimpleNamespace(async_config_entry_first_refresh=AsyncMock())
         namespace = {'DOMAIN': 'mosru_water', 'PLATFORMS': ['sensor', 'button'],
                      'MosRuWaterCoordinator': Mock(return_value=coordinator),
-                     'legacy_entry_updates': Mock(return_value={}),
                      '_async_register_services': Mock()}
         module = ast.Module(body=[ast.ImportFrom(module='__future__',
                           names=[ast.alias(name='annotations')], level=0), setup], type_ignores=[])

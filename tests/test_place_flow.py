@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock
 
-from test_reauth import SOURCE, load_flow_methods
+from test_reauth import SOURCE, identity, load_flow_methods
 
 _PLACE_A = {"user_place_id": "3395115", "paycode": "1344364128", "flat": "46",
             "address": "ул. Тестовая, д. 1"}
@@ -33,10 +33,10 @@ class FlowTestBase(unittest.IsolatedAsyncioTestCase):
         self.flow.async_show_form = Mock(return_value={"type": "form"})
         self.flow.async_abort = Mock(return_value={"type": "abort"})
         self.flow.async_step_sensors = AsyncMock(return_value={"type": "sensors"})
-        # Проверки дубликатов из HA ConfigFlow: прерывают мастер исключением.
+        # Native unique-ID handling is mocked; legacy matching reads real fixtures.
         self.flow.async_set_unique_id = AsyncMock()
         self.flow._abort_if_unique_id_configured = Mock()
-        self.flow._async_abort_entries_match = Mock()
+        self.flow._async_current_entries = Mock(return_value=[])
 
     def form_kwargs(self):
         return self.flow.async_show_form.call_args.kwargs
@@ -103,53 +103,76 @@ class PlaceStepTest(FlowTestBase):
         self.assertIn("ул. Тестовая, д. 1, кв. 46 — ЕПД 1344364128", labels)
         self.flow.async_step_discover.assert_not_awaited()
 
-    async def test_place_becomes_account_independent_unique_id(self):
+    async def test_place_becomes_unique_id(self):
         self.flow._client.list_places.return_value = [_PLACE_A]
         await self.flow.async_step_place()
         self.flow.async_set_unique_id.assert_awaited_once_with(
-            "paycode:1344364128:flat:46")
+            'flat:["1344364128","46"]')
         self.flow._abort_if_unique_id_configured.assert_called_once()
-        # Старую запись без unique_id находим даже после смены аккаунта и
-        # связанного с ним userPlaceId.
-        self.flow._async_abort_entries_match.assert_called_once_with(
-            {"paycode": "1344364128", "flat": "46"})
-
-    def test_same_flat_has_same_id_for_another_mosru_profile(self):
-        another_profile = {**_PLACE_A, "user_place_id": "9876543"}
-        self.assertEqual(
-            self.flow._place_unique_id(_PLACE_A),
-            self.flow._place_unique_id(another_profile),
-        )
-
-    async def test_place_without_paycode_falls_back_to_user_place_id(self):
-        place = {**_PLACE_A, "paycode": "", "flat": ""}
-        self.flow._client.list_places.return_value = [place]
-        await self.flow.async_step_place()
-        self.flow.async_set_unique_id.assert_awaited_once_with(
-            "user-place:3395115")
-        self.flow._async_abort_entries_match.assert_called_once_with(
-            {"user_place_id": "3395115"})
-
-    def test_entry_titles_distinguish_flats(self):
-        self.assertEqual(
-            self.flow._entry_title(_PLACE_A),
-            "MOS.RU Water Meter · ЕПД 1344364128 · кв. 46",
-        )
-        self.assertEqual(
-            self.flow._entry_title({
-                "user_place_id": "777", "paycode": "", "flat": "",
-            }),
-            "MOS.RU Water Meter · 777",
-        )
+        self.flow._async_current_entries.assert_called_once_with(include_ignore=False)
 
     async def test_already_added_place_stops_wizard(self):
-        class AbortFlow(Exception): pass
         self.flow._client.list_places.return_value = [_PLACE_A]
-        self.flow._async_abort_entries_match.side_effect = AbortFlow("already_configured")
-        with self.assertRaises(AbortFlow):
-            await self.flow.async_step_place()
+        self.flow._async_current_entries.return_value = [
+            SimpleNamespace(data=dict(_PLACE_A), unique_id=None)
+        ]
+        await self.flow.async_step_place()
+        self.flow.async_abort.assert_called_once_with(reason="already_configured")
         self.assertEqual(self.flow._data, {})
         self.flow.async_step_discover.assert_not_awaited()
+
+    async def test_logged_out_legacy_flat_with_changed_profile_is_rejected(self):
+        self.flow._async_current_entries.return_value = [SimpleNamespace(
+            data={"paycode": "1344364128", "flat": 46, "session_cookies": {}},
+            unique_id=None, disabled_by="user")]
+        await self.flow._async_select_place(
+            _PLACE_A | {"user_place_id": "new-profile"})
+        self.flow.async_abort.assert_called_once_with(reason="already_configured")
+        self.flow.async_step_discover.assert_not_awaited()
+        self.assertEqual(self.flow._data, {})
+
+    async def test_same_flat_on_another_account_is_rejected(self):
+        self.flow._async_current_entries.return_value = [SimpleNamespace(
+            data=_PLACE_A | {"user_place_id": "another-account-profile"},
+            unique_id="another-account-profile")]
+        await self.flow._async_select_place(_PLACE_A)
+        self.flow.async_abort.assert_called_once_with(reason="already_configured")
+
+    async def test_another_flat_can_finish_selection(self):
+        self.flow._async_current_entries.return_value = [SimpleNamespace(
+            data=_PLACE_A, unique_id=identity.place_unique_id(_PLACE_A))]
+        await self.flow._async_select_place(_PLACE_B)
+        self.flow.async_abort.assert_not_called()
+        self.flow.async_step_discover.assert_awaited_once()
+
+    async def test_missing_billing_details_use_profile_fallback(self):
+        place = _PLACE_B | {"paycode": "", "flat": ""}
+        await self.flow._async_select_place(place)
+        self.flow.async_set_unique_id.assert_awaited_once_with("999001")
+        self.flow.async_step_discover.assert_awaited_once()
+
+    async def test_logged_out_profile_fallback_matches_legacy_unique_id(self):
+        self.flow._async_current_entries.return_value = [
+            SimpleNamespace(data={"session_cookies": {}}, unique_id="999001")]
+        await self.flow._async_select_place(
+            _PLACE_B | {"paycode": "", "flat": ""})
+        self.flow.async_abort.assert_called_once_with(reason="already_configured")
+
+    async def test_logged_out_pr9_prefixed_fallback_is_rejected(self):
+        self.flow._async_current_entries.return_value = [SimpleNamespace(
+            data={"session_cookies": {}}, unique_id="user-place:999001")]
+        await self.flow._async_select_place(
+            _PLACE_B | {"paycode": "", "flat": ""})
+        self.flow.async_abort.assert_called_once_with(reason="already_configured")
+        self.flow.async_step_discover.assert_not_awaited()
+
+    async def test_empty_legacy_record_does_not_match_every_flat(self):
+        self.flow._async_current_entries.return_value = [
+            SimpleNamespace(data={"paycode": "", "flat": ""}, unique_id=None)]
+        await self.flow._async_select_place(
+            _PLACE_B | {"paycode": "", "flat": ""})
+        self.flow.async_abort.assert_not_called()
+        self.flow.async_step_discover.assert_awaited_once()
 
     async def test_choice_is_saved(self):
         self.flow._client.list_places.return_value = [_PLACE_A, _PLACE_B]
@@ -247,6 +270,25 @@ class DiscoverStepTest(FlowTestBase):
         self.assertEqual(self.form_kwargs()["step_id"], "discover")
         self.assertIn("Введите ID вручную",
                       self.form_kwargs()["description_placeholders"]["description"])
+
+
+class EntryTitleTest(FlowTestBase):
+    async def test_saved_entries_have_distinguishable_names(self):
+        del self.flow.async_step_sensors
+        self.flow.async_create_entry = Mock()
+        titles = []
+        for place in (_PLACE_A, _PLACE_B):
+            self.flow._data = dict(place)
+            await self.flow.async_step_sensors({
+                "cold_entity": "sensor.cold",
+                "hot_entity": "sensor.hot",
+                "submit_day": 20,
+            })
+            call = self.flow.async_create_entry.call_args.kwargs
+            titles.append(call["title"])
+            self.assertIn(place["paycode"], call["title"])
+            self.assertIn(place["flat"], call["title"])
+        self.assertNotEqual(*titles)
 
 
 class TranslationsTest(unittest.TestCase):

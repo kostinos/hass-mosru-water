@@ -8,24 +8,28 @@ from unittest.mock import AsyncMock, Mock
 SOURCE = Path(__file__).resolve().parents[1] / 'custom_components/mosru_water/config_flow.py'
 
 
+def load_logout_methods():
+    tree = ast.parse(SOURCE.read_text())
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef)
+               and n.name == 'MosRuWaterOptionsFlow')
+    cls.bases = []
+    cls.body = [n for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and n.name in {'__init__', 'async_step_init', 'async_step_logout'}]
+    module = ast.Module(body=[ast.ImportFrom(module='__future__', names=[
+        ast.alias(name='annotations')], level=0), cls], type_ignores=[])
+    ns = {'vol': SimpleNamespace(Schema=lambda value: value),
+          'CONF_SESSION_COOKIES': 'session_cookies', 'CONF_USER_PLACE_ID': 'user_place_id'}
+    exec(compile(ast.fix_missing_locations(module), str(SOURCE), 'exec'), ns)
+    return ns['MosRuWaterOptionsFlow']
+
+
 class LogoutTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        tree = ast.parse(SOURCE.read_text())
-        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef)
-                   and n.name == 'MosRuWaterOptionsFlow')
-        cls.bases = []
-        cls.body = [n for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    and n.name in {'__init__', 'async_step_init', 'async_step_logout'}]
-        module = ast.Module(body=[ast.ImportFrom(module='__future__', names=[
-            ast.alias(name='annotations')], level=0), cls], type_ignores=[])
-        ns = {'vol': SimpleNamespace(Schema=lambda value: value),
-              'CONF_SESSION_COOKIES': 'session_cookies', 'CONF_USER_PLACE_ID': 'user_place_id'}
-        exec(compile(ast.fix_missing_locations(module), str(SOURCE), 'exec'), ns)
         self.original = {'session_cookies': {'old': 'cookie'}, 'user_place_id': 'old-profile',
                          'paycode': '123', 'cold_counter_id': 'cold', 'submit_day': 20}
         self.entry = SimpleNamespace(entry_id='entry', data=dict(self.original),
                                      options={'cold_entity': 'sensor.water'}, async_start_reauth=Mock())
-        self.flow = ns['MosRuWaterOptionsFlow'](self.entry)
+        self.flow = load_logout_methods()(self.entry)
         self.manager = SimpleNamespace(async_unload=AsyncMock(return_value=True),
                                        async_update_entry=Mock())
         self.flow.hass = SimpleNamespace(config_entries=self.manager)

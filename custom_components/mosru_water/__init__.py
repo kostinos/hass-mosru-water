@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import voluptuous as vol
 
@@ -13,7 +14,12 @@ from homeassistant.helpers.service import async_register_admin_service
 
 from .const import DOMAIN
 from .coordinator import MosRuWaterCoordinator
-from .entry_identity import legacy_entry_updates
+from .identity import (
+    is_generated_legacy_title,
+    migrated_unique_id,
+    place_title,
+    places_match,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -28,10 +34,41 @@ _REPLACE_SCHEMA = vol.Schema({
 })
 
 
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Upgrade identity in place without changing entities or settings."""
+    if entry.version != 1:
+        _LOGGER.error("Unsupported mosru_water entry version: %s", entry.version)
+        return False
+    if entry.minor_version >= 2:
+        return True
+
+    for other in hass.config_entries.async_entries(DOMAIN, include_ignore=False):
+        if other.entry_id != entry.entry_id and places_match(
+            entry.data,
+            other.data,
+            left_unique_id=entry.unique_id,
+            right_unique_id=other.unique_id,
+        ):
+            _LOGGER.error(
+                "Cannot migrate mosru_water entry %s: duplicate apartment in "
+                "entry %s. Resolve the duplicate entries before reloading the "
+                "integration",
+                entry.entry_id,
+                other.entry_id,
+            )
+            return False
+
+    updates: dict[str, Any] = {"minor_version": 2}
+    if unique_id := migrated_unique_id(entry.data, entry.unique_id):
+        updates["unique_id"] = unique_id
+    if is_generated_legacy_title(entry.title, entry.data):
+        updates["title"] = place_title(entry.data)
+    hass.config_entries.async_update_entry(entry, **updates)
+    return True
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Настройка интеграции из config entry."""
-    if updates := legacy_entry_updates(entry.title, entry.unique_id, entry.data):
-        hass.config_entries.async_update_entry(entry, **updates)
 
     hass.data.setdefault(DOMAIN, {})
 
