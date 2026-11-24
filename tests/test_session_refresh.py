@@ -29,7 +29,7 @@ class SessionRefreshTest(unittest.TestCase):
               'MosRuAuthError': AuthError, 'MosRuTemporaryError': TemporaryError,
               'MosRuApiError': ApiError, 'ConfigEntryAuthFailed': ReauthRequired,
               'UpdateFailed': ApiError, '_LOGGER': Mock()}
-        for name in ('USER_PLACE_ID', 'PAYCODE', 'FLAT', 'COLD_ID', 'HOT_ID'):
+        for name in ('USER_PLACE_ID', 'PAYCODE', 'FLAT', 'COLD_ID', 'HOT_ID', 'EXTRA_METERS'):
             ns['CONF_' + name] = name.lower()
         exec(compile(ast.fix_missing_locations(module), str(SOURCE), 'exec'), ns)
         self.coordinator = ns['MosRuWaterCoordinator']()

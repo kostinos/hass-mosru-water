@@ -315,3 +315,25 @@ class DuplicateMeterTest(FlowTestBase):
         await self.flow.async_step_discover({'cold_counter_id': 'same', 'hot_counter_id': 'same'})
         self.flow.async_step_sensors.assert_not_awaited()
         self.assertEqual(self.form_kwargs()['errors']['base'], 'duplicate_counters')
+
+
+class AdditionalMeterSetupTest(FlowTestBase):
+    async def test_four_meters_are_bound_during_setup(self):
+        del self.flow.async_step_sensors
+        self.flow.async_create_entry = Mock()
+        self.flow._data.update(cold_counter_id="1", hot_counter_id="2")
+        self.flow._counters = [_COLD, _HOT, _COLD | {"id": "3"}, _HOT | {"id": "4"}]
+
+        await self.flow.async_step_sensors({
+            "cold_entity": "sensor.cold", "hot_entity": "sensor.hot", "submit_day": 20,
+        })
+        self.assertEqual(self.form_kwargs()["step_id"], "extra_meter")
+        await self.flow.async_step_extra_meter({"meter_id": "3", "meter_entity": "sensor.cold"})
+        self.assertEqual(self.form_kwargs()["errors"], {"meter_entity": "duplicate_sensors"})
+        await self.flow.async_step_extra_meter({"meter_id": "3", "meter_entity": "sensor.cold_two"})
+        self.flow.async_create_entry.assert_not_called()
+        await self.flow.async_step_extra_meter({"meter_id": "4", "meter_entity": "sensor.hot_two"})
+
+        saved = self.flow.async_create_entry.call_args.kwargs["data"]
+        self.assertEqual(saved["extra_meters"], {"3": "sensor.cold_two", "4": "sensor.hot_two"})
+        self.assertEqual(saved["cold_entity"], "sensor.cold")

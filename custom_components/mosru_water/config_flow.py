@@ -28,7 +28,7 @@ from .const import (
     DOMAIN,
     CONF_PAYCODE, CONF_FLAT, CONF_USER_PLACE_ID,
     CONF_COLD_ID, CONF_HOT_ID,
-    CONF_COLD_ENTITY, CONF_HOT_ENTITY, CONF_SUBMIT_DAY,
+    CONF_COLD_ENTITY, CONF_HOT_ENTITY, CONF_EXTRA_METERS, CONF_SUBMIT_DAY,
     CONF_SESSION_COOKIES,
     UNIT_M3,
 )
@@ -49,6 +49,40 @@ def _validate_sensor(hass: HomeAssistant, entity_id: str) -> str | None:
     if state.attributes.get("unit_of_measurement", "") != UNIT_M3:
         return "wrong_unit"
     return None
+
+
+def _validate_extra_sensor(
+    hass: HomeAssistant, data: dict, counter_id: str, entity_id: str
+) -> str | None:
+    used = {data[CONF_COLD_ENTITY], data[CONF_HOT_ENTITY]}
+    used.update(
+        entity for meter, entity in data.get(CONF_EXTRA_METERS, {}).items()
+        if meter != counter_id
+    )
+    if entity_id in used:
+        return "duplicate_sensors"
+    return _validate_sensor(hass, entity_id)
+
+
+def _extra_meter_schema(
+    available: dict[str, dict], bindings: dict[str, str] | None = None
+) -> vol.Schema:
+    return vol.Schema({
+        vol.Optional("meter_id"): selector.SelectSelector(
+            selector.SelectSelectorConfig(options=[
+                selector.SelectOptionDict(
+                    value=meter_id,
+                    label=f"{info.get('name') or info.get('number') or meter_id} "
+                          f"({info.get('type') or '—'}, ID: {meter_id})"
+                          f"{' — ' + bindings[meter_id] if bindings and meter_id in bindings else ''}",
+                )
+                for meter_id, info in available.items()
+            ])
+        ),
+        vol.Optional("meter_entity"): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="sensor")
+        ),
+    })
 
 
 def _write_qr_svg(www_dir: str, link: str, cache_buster: int) -> str:
@@ -216,12 +250,11 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
             return self.async_show_progress_done(next_step_id="delivery")
 
-        if not result:
-            # QR истёк или ошибка — начать заново со свежей сессией
-            self._client = MosRuClient()
-            return await self.async_step_qr()
-
         pn_dismiss(self.hass, notification_id="mosru_water_qr")
+        if result == "qr_expired":
+            return self.async_show_progress_done(next_step_id="qr_retry")
+        if not result:
+            return self.async_abort(reason="cannot_connect")
 
         # Сохранить cookies
         cookies = await self.hass.async_add_executor_job(
@@ -236,6 +269,15 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
 
         return self.async_show_progress_done(next_step_id="place")
+
+    async def async_step_qr_retry(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Показать истечение срока QR и дать начать новый вход."""
+        if user_input is None:
+            return self.async_show_form(step_id="qr_retry", data_schema=vol.Schema({}))
+        self._client = MosRuClient()
+        return await self.async_step_qr()
 
     def _notify_qr_auth(self) -> None:
         """Показать актуальную ссылку подтверждения той же сессии, что в QR."""
@@ -252,7 +294,7 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             notification_id="mosru_water_qr",
         )
 
-    async def _poll_qr_scan(self) -> bool:
+    async def _poll_qr_scan(self) -> bool | str:
         """Фоновая задача: опросить QR до сканирования или истечения."""
         for tick in range(_QR_POLL_SECONDS):
             await asyncio.sleep(1)
@@ -285,25 +327,9 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 continue
 
             if command == "needRefresh":
-                try:
-                    qr_data = await self.hass.async_add_executor_job(
-                        self._client.refresh_qr
-                    )
-                    ts = int(time.time())
-                    www_dir = self.hass.config.path("www")
-                    self._qr_link = qr_data["link"]
-                    await self._async_cleanup_qr()
-                    self._qr_url = await self.hass.async_add_executor_job(
-                        _write_qr_svg, www_dir, self._qr_link, ts
-                    )
-                    self._notify_qr_auth()
-                except MosRuApiError:
-                    return False
-                continue
+                return "qr_expired"
 
-            # showQRCode — продолжаем опрос
-
-        return False  # таймаут
+        return "qr_expired"
 
     # ── Шаг 3: ввод 6-значного 2FA-кода ─────────────────────────────────
 
@@ -582,8 +608,14 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if err:
                     errors[field] = err
 
+            if user_input[CONF_COLD_ENTITY] == user_input[CONF_HOT_ENTITY]:
+                errors["base"] = "duplicate_sensors"
             if not errors:
                 self._data.update(user_input)
+                if any(counter["id"] not in (
+                    self._data[CONF_COLD_ID], self._data[CONF_HOT_ID]
+                ) for counter in self._counters):
+                    return await self.async_step_extra_meter()
                 return self.async_create_entry(
                     title=place_title(self._data),
                     data=self._data,
@@ -602,6 +634,40 @@ class MosRuWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     selector.NumberSelectorConfig(min=1, max=28, mode="box")
                 ),
             }),
+            errors=errors,
+        )
+
+    async def async_step_extra_meter(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Привязать остальные найденные счётчики или закончить настройку."""
+        bindings = self._data.setdefault(CONF_EXTRA_METERS, {})
+        primary_ids = {self._data[CONF_COLD_ID], self._data[CONF_HOT_ID]}
+        available = {
+            counter["id"]: counter for counter in self._counters
+            if counter["id"] not in primary_ids and counter["id"] not in bindings
+        }
+        errors = {}
+        if user_input:
+            counter_id = user_input.get("meter_id")
+            entity_id = user_input.get("meter_entity")
+            if counter_id not in available:
+                errors["meter_id"] = "unknown_meter"
+            if not entity_id:
+                errors["meter_entity"] = "required"
+            else:
+                error = _validate_extra_sensor(self.hass, self._data, counter_id, entity_id)
+                if error:
+                    errors["meter_entity"] = error
+            if not errors:
+                bindings[counter_id] = entity_id
+                available.pop(counter_id)
+
+        if not available or user_input == {}:
+            return self.async_create_entry(title=place_title(self._data), data=self._data)
+        return self.async_show_form(
+            step_id="extra_meter",
+            data_schema=_extra_meter_schema(available),
             errors=errors,
         )
 
@@ -637,7 +703,7 @@ class MosRuWaterOptionsFlow(config_entries.OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         return self.async_show_menu(
-            step_id="init", menu_options=["settings", "logout"]
+            step_id="init", menu_options=["settings", "additional_meters", "logout"]
         )
 
     async def async_step_logout(
@@ -659,6 +725,47 @@ class MosRuWaterOptionsFlow(config_entries.OptionsFlow):
         self._entry.async_start_reauth(self.hass)
         return self.async_abort(reason="reauth_started")
 
+    async def async_step_additional_meters(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Добавить, изменить или удалить привязку дополнительного счётчика."""
+        data = {**self._entry.data, **self._entry.options}
+        bindings = dict(data.get(CONF_EXTRA_METERS, {}))
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id)
+        devices = ((coordinator.data or {}).get("available_meters", {})
+                   if coordinator is not None else {})
+        primary_ids = {data[CONF_COLD_ID], data[CONF_HOT_ID]}
+        available = {meter_id: devices.get(meter_id, {}) for meter_id in bindings}
+        available.update({
+            meter_id: info for meter_id, info in devices.items() if meter_id not in primary_ids
+        })
+        if not available:
+            return self.async_abort(reason="no_additional_meters")
+
+        errors = {}
+        if user_input is not None:
+            counter_id = user_input.get("meter_id")
+            entity_id = user_input.get("meter_entity")
+            if counter_id not in available:
+                errors["meter_id"] = "unknown_meter"
+            elif entity_id:
+                error = _validate_extra_sensor(self.hass, data, counter_id, entity_id)
+                if error:
+                    errors["meter_entity"] = error
+                else:
+                    bindings[counter_id] = entity_id
+            else:
+                bindings.pop(counter_id, None)
+            if not errors:
+                return self.async_create_entry(
+                    title="", data={**self._entry.options, CONF_EXTRA_METERS: bindings}
+                )
+
+        return self.async_show_form(
+            step_id="additional_meters",
+            data_schema=_extra_meter_schema(available, bindings), errors=errors
+        )
+
     async def async_step_settings(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -675,8 +782,21 @@ class MosRuWaterOptionsFlow(config_entries.OptionsFlow):
             if not user_input.get(CONF_HOT_ID, "").strip():
                 errors[CONF_HOT_ID] = "required"
 
+            bindings = data.get(CONF_EXTRA_METERS, {})
+            cold_id = user_input.get(CONF_COLD_ID, "").strip()
+            hot_id = user_input.get(CONF_HOT_ID, "").strip()
+            if cold_id == hot_id or cold_id in bindings or hot_id in bindings:
+                errors["base"] = "duplicate_counters"
+            cold_entity = user_input[CONF_COLD_ENTITY]
+            hot_entity = user_input[CONF_HOT_ENTITY]
+            if (cold_entity == hot_entity or cold_entity in bindings.values()
+                    or hot_entity in bindings.values()):
+                errors["base"] = "duplicate_sensors"
+
             if not errors:
-                return self.async_create_entry(title="", data=user_input)
+                return self.async_create_entry(title="", data={
+                    **self._entry.options, **user_input, CONF_COLD_ID: cold_id, CONF_HOT_ID: hot_id,
+                })
 
         return self.async_show_form(
             step_id="settings",

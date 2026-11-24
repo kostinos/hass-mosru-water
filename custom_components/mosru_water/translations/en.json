@@ -55,10 +55,22 @@
           "hot_entity": "Hot water sensor",
           "submit_day": "Day of the month for auto-submission"
         }
+      },
+      "extra_meter": {
+        "title": "Additional meter",
+        "description": "Select another meter and its sensor. Submit both fields empty to finish.",
+        "data": {
+          "meter_id": "Meter",
+          "meter_entity": "Reading sensor (m³)"
+        }
+      },
+      "qr_retry": {
+        "title": "QR code expired",
+        "description": "Submit this form to get a new code. If the app asks you to confirm the login after scanning, confirm it there."
       }
     },
     "progress": {
-      "scanning": "Scan the QR code with the **mos.ru** or **Gosuslugi Moscow** app:\n\n![QR code]({qr_url})\n\n[Open QR code in a new tab]({qr_link})\n\nWaiting for scan..."
+      "scanning": "Scan the QR code with the **mos.ru** or **Gosuslugi Moscow** app:\n\n![QR code]({qr_url})\n\n[Open QR code in a new tab]({qr_link})\n\nWaiting for scan...\n\nIf prompted in the app, confirm the login after scanning."
     },
     "error": {
       "entity_not_found": "Sensor not found in Home Assistant",
@@ -66,7 +78,9 @@
       "invalid_code": "Invalid confirmation code. Please try again.",
       "required": "This field is required",
       "cannot_get_places": "Could not get the apartment list from Electronic House: {error}. Submit the form again to retry.",
-      "duplicate_counters": "Choose different cold and hot water meters"
+      "duplicate_counters": "Choose different cold and hot water meters",
+      "duplicate_sensors": "Choose a different sensor for each meter.",
+      "unknown_meter": "Choose a meter from the list."
     },
     "abort": {
       "already_configured": "This flat is already configured",
@@ -95,23 +109,36 @@
         "title": "MOS.RU Water Meter",
         "menu_options": {
           "settings": "Settings",
-          "logout": "Sign out and sign in again"
+          "logout": "Sign out and sign in again",
+          "additional_meters": "Additional meters"
         }
       },
       "logout": {
         "title": "Sign out of mos.ru in Home Assistant",
         "description": "The saved session will be removed and updates and submissions will stop until you sign in again using a QR code. Your meters, sensors and submission schedule will be kept. This does not sign you out on other devices."
+      },
+      "additional_meters": {
+        "title": "Additional meters",
+        "description": "Choose a meter and a sensor to add or update its mapping. Choose a meter and leave the sensor empty to remove its mapping.",
+        "data": {
+          "meter_id": "Meter",
+          "meter_entity": "Reading sensor (m³)"
+        }
       }
     },
     "error": {
       "entity_not_found": "Sensor not found in Home Assistant",
       "wrong_unit": "Sensor must return a value in m³",
       "required": "This field is required",
-      "cannot_request_sms": "Could not request a code by SMS. Try again."
+      "cannot_request_sms": "Could not request a code by SMS. Try again.",
+      "duplicate_sensors": "Choose a different sensor for each meter.",
+      "unknown_meter": "Choose a meter from the list.",
+      "duplicate_counters": "Choose different meters."
     },
     "abort": {
       "logout_failed": "Could not stop the integration. The session was not removed.",
-      "reauth_started": "Signed out. Continue signing in from the integration page or the MOS.RU Water notification."
+      "reauth_started": "Signed out. Continue signing in from the integration page or the MOS.RU Water notification.",
+      "no_additional_meters": "No additional meters found. If you just signed in, wait for the integration to update."
     }
   }
 }
