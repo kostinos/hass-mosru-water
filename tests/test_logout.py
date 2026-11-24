@@ -88,29 +88,38 @@ class AdditionalMeterOptionsTest(unittest.IsolatedAsyncioTestCase):
         self.flow.async_create_entry = Mock()
 
     async def test_add_change_remove_through_existing_entry_options(self):
-        for meter, sensor in [("3", "sensor.three"), ("4", "sensor.four"),
-                              ("3", "sensor.replacement"), ("4", None)]:
-            fields = {"meter_id": meter}
-            if sensor:
-                fields["meter_entity"] = sensor
-            await self.flow.async_step_additional_meters(fields)
-            self.entry.options = self.flow.async_create_entry.call_args.kwargs["data"]
-        self.assertEqual(self.entry.options, {
+        await self.flow.async_step_additional_meters()
+        fields = list(self.flow.async_show_form.call_args.kwargs["data_schema"])
+        self.assertEqual(fields, ["— · 3 (ID 3)", "— · 4 (ID 4)"])
+
+        await self.flow.async_step_additional_meters({
+            fields[0]: "sensor.three", fields[1]: "sensor.four",
+        })
+        self.entry.options = self.flow.async_create_entry.call_args.kwargs["data"]
+        self.assertEqual(self.entry.options["extra_meters"], {
+            "3": "sensor.three", "4": "sensor.four",
+        })
+
+        await self.flow.async_step_additional_meters({fields[0]: "sensor.replacement"})
+        self.assertEqual(self.flow.async_create_entry.call_args.kwargs["data"], {
             "submit_day": 18, "extra_meters": {"3": "sensor.replacement"},
         })
         self.assertEqual(self.entry.data["cold_entity"], "sensor.one")
 
-    async def test_primary_bindings_cannot_be_reused_for_extra_meter(self):
-        await self.flow.async_step_additional_meters({
-            "meter_id": "1", "meter_entity": "sensor.three",
-        })
+    async def test_portal_refresh_does_not_rename_open_form_fields(self):
+        await self.flow.async_step_additional_meters()
+        self.flow.hass.data["mosru_water"]["entry"].data["available_meters"]["3"] = {
+            "type": "ХВС", "number": "new label",
+        }
+        await self.flow.async_step_additional_meters({"— · 3 (ID 3)": "sensor.three"})
+        self.assertEqual(self.flow.async_create_entry.call_args.kwargs["data"]["extra_meters"],
+                         {"3": "sensor.three"})
+
+    async def test_primary_sensor_cannot_be_reused_for_extra_meter(self):
+        field = "— · 3 (ID 3)"
+        await self.flow.async_step_additional_meters({field: "sensor.one"})
         self.assertEqual(self.flow.async_show_form.call_args.kwargs["errors"],
-                         {"meter_id": "unknown_meter"})
-        await self.flow.async_step_additional_meters({
-            "meter_id": "3", "meter_entity": "sensor.one",
-        })
-        self.assertEqual(self.flow.async_show_form.call_args.kwargs["errors"],
-                         {"meter_entity": "duplicate_sensors"})
+                         {field: "duplicate_sensors"})
         self.flow.async_create_entry.assert_not_called()
 
     async def test_editing_primary_settings_preserves_additional_meters(self):

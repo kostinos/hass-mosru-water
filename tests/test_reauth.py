@@ -33,7 +33,7 @@ def load_flow_methods():
              "async_step_qr", "async_step_code", "async_step_totp", "_async_submit_code",
              "async_step_delivery", "async_step_request_sms",
              "async_step_user", "async_step_place", "_load_places", "_async_select_place",
-             "async_step_discover", "async_step_sensors", "async_step_extra_meter",
+             "async_step_discover", "async_step_sensors", "async_step_meter_sources",
              "async_step_qr_retry"}
     names.update({'_async_cleanup_qr', '_qr_finished'})
     cls.bases = []
@@ -43,7 +43,7 @@ def load_flow_methods():
     module = ast.Module(body=[ast.ImportFrom(module="__future__", names=[
         ast.alias(name="annotations")], level=0), *[
             node for node in tree.body if isinstance(node, ast.FunctionDef)
-            and node.name in {"_validate_extra_sensor", "_extra_meter_schema"}
+            and node.name in {"_meter_fields", "_meter_source_schema", "_read_meter_sources"}
         ], cls], type_ignores=[])
     required_calls = []
 

@@ -229,9 +229,10 @@ class DiscoverStepTest(FlowTestBase):
         self.flow.async_show_form.assert_not_called()
         self.flow.async_step_sensors.assert_awaited_once()
 
-    async def test_ambiguous_meters_are_filtered_and_prefilled(self):
+    async def test_unknown_type_keeps_manual_selection(self):
         cold2 = {"id": "3", "name": "14-000001", "type": "ХВС"}
-        self.flow._client.get_counters.return_value = [_COLD, cold2, _HOT]
+        unknown = {"id": "4", "name": "UNKNOWN", "type": ""}
+        self.flow._client.get_counters.return_value = [_COLD, cold2, _HOT, unknown]
         selector = self.ns["selector"]
         await self.flow.async_step_discover()
         self.assertEqual(self.form_kwargs()["step_id"], "discover")
@@ -278,7 +279,7 @@ class EntryTitleTest(FlowTestBase):
         self.flow.async_create_entry = Mock()
         titles = []
         for place in (_PLACE_A, _PLACE_B):
-            self.flow._data = dict(place)
+            self.flow._data = {**place, "cold_counter_id": "1", "hot_counter_id": "2"}
             await self.flow.async_step_sensors({
                 "cold_entity": "sensor.cold",
                 "hot_entity": "sensor.hot",
@@ -318,22 +319,50 @@ class DuplicateMeterTest(FlowTestBase):
 
 
 class AdditionalMeterSetupTest(FlowTestBase):
-    async def test_four_meters_are_bound_during_setup(self):
-        del self.flow.async_step_sensors
+    def setUp(self):
+        super().setUp()
         self.flow.async_create_entry = Mock()
-        self.flow._data.update(cold_counter_id="1", hot_counter_id="2")
-        self.flow._counters = [_COLD, _HOT, _COLD | {"id": "3"}, _HOT | {"id": "4"}]
+        self.flow._client.get_counters.return_value = [
+            _COLD, _HOT, _COLD | {"id": "3", "name": "COLD-002"},
+            _HOT | {"id": "4", "name": "HOT-002"},
+        ]
+        self.flow._data["user_place_id"] = "apartment"
 
-        await self.flow.async_step_sensors({
-            "cold_entity": "sensor.cold", "hot_entity": "sensor.hot", "submit_day": 20,
+    async def test_four_meters_are_bound_in_one_form(self):
+        await self.flow.async_step_discover()
+        form = self.form_kwargs()
+        self.assertEqual(form["step_id"], "meter_sources")
+        self.assertEqual(list(form["data_schema"]), [
+            "ХВС · TEST-COLD-001 (ID 1)", "ГВС · TEST-HOT-001 (ID 2)",
+            "ХВС · COLD-002 (ID 3)", "ГВС · HOT-002 (ID 4)", "submit_day",
+        ])
+        await self.flow.async_step_meter_sources({
+            "ХВС · TEST-COLD-001 (ID 1)": "sensor.cold",
+            "ГВС · TEST-HOT-001 (ID 2)": "sensor.hot",
+            "ХВС · COLD-002 (ID 3)": "sensor.cold_two",
+            "ГВС · HOT-002 (ID 4)": "sensor.hot_two",
+            "submit_day": 18,
         })
-        self.assertEqual(self.form_kwargs()["step_id"], "extra_meter")
-        await self.flow.async_step_extra_meter({"meter_id": "3", "meter_entity": "sensor.cold"})
-        self.assertEqual(self.form_kwargs()["errors"], {"meter_entity": "duplicate_sensors"})
-        await self.flow.async_step_extra_meter({"meter_id": "3", "meter_entity": "sensor.cold_two"})
-        self.flow.async_create_entry.assert_not_called()
-        await self.flow.async_step_extra_meter({"meter_id": "4", "meter_entity": "sensor.hot_two"})
-
         saved = self.flow.async_create_entry.call_args.kwargs["data"]
         self.assertEqual(saved["extra_meters"], {"3": "sensor.cold_two", "4": "sensor.hot_two"})
         self.assertEqual(saved["cold_entity"], "sensor.cold")
+        self.assertEqual(saved["hot_entity"], "sensor.hot")
+        self.assertEqual(saved["submit_day"], 18)
+
+    async def test_unbound_meters_are_skipped_and_duplicates_are_rejected(self):
+        await self.flow.async_step_discover()
+        cold = "ХВС · COLD-002 (ID 3)"
+        hot = "ГВС · HOT-002 (ID 4)"
+        await self.flow.async_step_meter_sources({cold: "sensor.one", "submit_day": 20})
+        self.assertEqual(self.form_kwargs()["errors"], {"base": "require_cold_and_hot"})
+        await self.flow.async_step_meter_sources({
+            cold: "sensor.one", hot: "sensor.one", "submit_day": 20,
+        })
+        self.assertEqual(self.form_kwargs()["errors"], {hot: "duplicate_sensors"})
+        self.flow.async_create_entry.assert_not_called()
+        await self.flow.async_step_meter_sources({
+            cold: "sensor.one", hot: "sensor.two", "submit_day": 20,
+        })
+        saved = self.flow.async_create_entry.call_args.kwargs["data"]
+        self.assertEqual((saved["cold_counter_id"], saved["hot_counter_id"]), ("3", "4"))
+        self.assertEqual(saved["extra_meters"], {})

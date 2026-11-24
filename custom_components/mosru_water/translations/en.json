@@ -56,17 +56,16 @@
           "submit_day": "Day of the month for auto-submission"
         }
       },
-      "extra_meter": {
-        "title": "Additional meter",
-        "description": "Select another meter and its sensor. Submit both fields empty to finish.",
-        "data": {
-          "meter_id": "Meter",
-          "meter_entity": "Reading sensor (m³)"
-        }
-      },
       "qr_retry": {
         "title": "QR code expired",
         "description": "Submit this form to get a new code. If the app asks you to confirm the login after scanning, confirm it there."
+      },
+      "meter_sources": {
+        "title": "Meter readings",
+        "description": "Choose a Home Assistant sensor in m³ for each meter you want to send readings for. Select at least one cold and one hot water meter.",
+        "data": {
+          "submit_day": "Day of the month for auto-submission"
+        }
       }
     },
     "progress": {
@@ -80,7 +79,7 @@
       "cannot_get_places": "Could not get the apartment list from Electronic House: {error}. Submit the form again to retry.",
       "duplicate_counters": "Choose different cold and hot water meters",
       "duplicate_sensors": "Choose a different sensor for each meter.",
-      "unknown_meter": "Choose a meter from the list."
+      "require_cold_and_hot": "Bind at least one cold and one hot water meter."
     },
     "abort": {
       "already_configured": "This flat is already configured",
@@ -119,11 +118,7 @@
       },
       "additional_meters": {
         "title": "Additional meters",
-        "description": "Choose a meter and a sensor to add or update its mapping. Choose a meter and leave the sensor empty to remove its mapping.",
-        "data": {
-          "meter_id": "Meter",
-          "meter_entity": "Reading sensor (m³)"
-        }
+        "description": "Choose a reading sensor in m³ for each meter. Clear a sensor to remove its mapping."
       }
     },
     "error": {
@@ -132,7 +127,6 @@
       "required": "This field is required",
       "cannot_request_sms": "Could not request a code by SMS. Try again.",
       "duplicate_sensors": "Choose a different sensor for each meter.",
-      "unknown_meter": "Choose a meter from the list.",
       "duplicate_counters": "Choose different meters."
     },
     "abort": {
