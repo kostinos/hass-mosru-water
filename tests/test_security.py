@@ -70,6 +70,42 @@ class ReadingSafetyTests(unittest.TestCase):
         self.client.send_reading.assert_not_called()
         self.client.remove_last_indication.assert_not_called()
 
+    def configure_four_meters(self):
+        self.config[const.CONF_EXTRA_METERS] = {
+            'cold-extra': 'sensor.cold_extra', 'hot-extra': 'sensor.hot_extra',
+        }
+        self.states['sensor.cold_extra'] = SimpleNamespace(**vars(self.states['sensor.cold']))
+        self.states['sensor.hot_extra'] = SimpleNamespace(**vars(self.states['sensor.hot']))
+        self.info['cold-extra'] = dict(self.info['cold'])
+        self.info['hot-extra'] = dict(self.info['hot'])
+
+    def test_submits_four_meters_in_one_operation(self):
+        self.configure_four_meters()
+        result = self.coordinator._submit()
+        self.assertEqual(result['last_status'], 'success')
+        self.assertEqual(
+            [call.args for call in self.client.send_reading.call_args_list],
+            [('synthetic-place', meter_id, reading) for meter_id, reading in
+             [('cold', 106), ('hot', 52), ('cold-extra', 106), ('hot-extra', 52)]],
+        )
+        self.assertEqual(result['operation_results']['ID hot-extra']['stage'], 'submitted')
+
+    def test_bad_extra_meter_prevents_any_replace(self):
+        self.configure_four_meters()
+        del self.info['hot-extra']
+        with self.assertRaises(namespace['UpdateFailed']):
+            self.coordinator._submit(replace=True)
+        self.assert_no_writes()
+
+    def test_extra_meter_failure_preserves_partial_result(self):
+        self.configure_four_meters()
+        self.client.send_reading.side_effect = [{}, {}, {}, api.MosRuTemporaryError('timeout')]
+        result = self.coordinator._submit()
+        self.assertEqual(result['last_status'], 'partial')
+        self.assertEqual(result['last_cold'], 106)
+        self.assertEqual(result['operation_results']['ID cold-extra']['stage'], 'submitted')
+        self.assertEqual(result['operation_results']['ID hot-extra']['stage'], 'send_unknown')
+
     def test_invalid_values_never_reach_network(self):
         for value in ('nan', 'inf', '-1', '1e100', 'unknown'):
             with self.subTest(value=value):

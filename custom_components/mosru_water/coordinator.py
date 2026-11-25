@@ -26,7 +26,7 @@ from .const import (
     DOMAIN,
     CONF_PAYCODE, CONF_FLAT, CONF_USER_PLACE_ID,
     CONF_COLD_ID, CONF_HOT_ID,
-    CONF_COLD_ENTITY, CONF_HOT_ENTITY, CONF_SUBMIT_DAY,
+    CONF_COLD_ENTITY, CONF_HOT_ENTITY, CONF_EXTRA_METERS, CONF_SUBMIT_DAY,
     CONF_SESSION_COOKIES,
     UPDATE_INTERVAL_MINUTES,
     ED_SESSION_REFRESH_SECONDS,
@@ -215,6 +215,11 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         hot_info  = device_map.get(cfg.get(CONF_HOT_ID, ""), {})
 
         return {
+            "available_meters":       device_map,
+            "extra_readonly": {
+                meter_id: device_map.get(meter_id, {}).get("readonly", True)
+                for meter_id in cfg.get(CONF_EXTRA_METERS, {})
+            },
             "cold_current":           cold_info.get("current_reading"),
             "hot_current":            hot_info.get("current_reading"),
             "cold_readonly":          cold_info.get("readonly", True),
@@ -283,21 +288,32 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         пользователя (сервис mosru_water.replace_readings).
         """
         cfg = self._get_effective_config()
-        if (cfg[CONF_COLD_ENTITY] == cfg[CONF_HOT_ENTITY]
-                or cfg[CONF_COLD_ID] == cfg[CONF_HOT_ID]):
-            raise UpdateFailed('Холодная и горячая вода должны использовать разные сенсоры и счётчики')
-        cold_val = normalized_reading(self._read_sensor(cfg[CONF_COLD_ENTITY]))
-        hot_val  = normalized_reading(self._read_sensor(cfg[CONF_HOT_ENTITY]))
+        extra_meters = cfg.get(CONF_EXTRA_METERS, {})
+        bindings = [
+            (cfg[CONF_COLD_ID], cfg[CONF_COLD_ENTITY], "холодная"),
+            (cfg[CONF_HOT_ID], cfg[CONF_HOT_ENTITY], "горячая"),
+        ]
+        bindings.extend(
+            (meter_id, entity_id, f"ID {meter_id}")
+            for meter_id, entity_id in extra_meters.items()
+        )
+        if (len({meter_id for meter_id, _, _ in bindings}) != len(bindings)
+                or len({entity_id for _, entity_id, _ in bindings}) != len(bindings)):
+            raise UpdateFailed("Для каждого счётчика нужен отдельный сенсор и уникальный ID")
+        readings = [
+            (meter_id, normalized_reading(self._read_sensor(entity_id)), label)
+            for meter_id, entity_id, label in bindings
+        ]
         client, user_place_id = self._prepare_client()
 
-        # Validate BOTH targets before any PUT/DELETE, including manually supplied IDs.
+        # Validate all targets before any PUT/DELETE, including manually supplied IDs.
         try:
             device_map = client.get_device_info(user_place_id)
         except MosRuAuthError as err:
             self._invalidate_client()
             raise ConfigEntryAuthFailed('Сессия портала истекла') from err
         closed_current = set()
-        for counter_id, value in ((cfg[CONF_COLD_ID], cold_val), (cfg[CONF_HOT_ID], hot_val)):
+        for counter_id, value, _ in readings:
             info = device_map.get(counter_id)
             if not info:
                 raise UpdateFailed('Счётчик не найден в выбранной квартире')
@@ -359,8 +375,10 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 raise
 
         try:
-            cold_resp = submit_one(cfg[CONF_COLD_ID], cold_val, "холодная")
-            hot_resp  = submit_one(cfg[CONF_HOT_ID], hot_val, "горячая")
+            responses = {
+                label: submit_one(counter_id, value, label)
+                for counter_id, value, label in readings
+            }
         except (MosRuAuthError, MosRuApiError) as err:
             changed_or_unknown = any(item['stage'] in {
                 'submitted', 'delete_unknown', 'send_unknown',
@@ -391,32 +409,21 @@ class MosRuWaterCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return partial
 
         self._submitted_month = self._current_month()
-        # Aware datetime: сенсор объявлен device_class TIMESTAMP, HA требует tzinfo.
-        submitted_at = dt_util.now()
-
-        if len(already) == 2:
-            _LOGGER.info(
-                "Показания за текущий период уже внесены на портале, отправка не требуется"
-            )
-        else:
-            _LOGGER.info(
-                "Показания отправлены: холодная=%.3f м³, горячая=%.3f м³",
-                cold_val, hot_val,
-            )
-
+        all_already_submitted = len(already) == len(readings)
         result = {
-            "last_status":       "already_submitted" if len(already) == 2 else "success",
-            "last_submitted_at": submitted_at,
-            "cold_response":     cold_resp,
-            "hot_response":      hot_resp,
+            "last_status": "already_submitted" if all_already_submitted else "success",
+            "cold_response": responses["холодная"],
+            "hot_response": responses["горячая"],
             "operation_results": outcomes,
         }
-        if 'холодная' not in already:
-            result['last_cold'] = cold_val
-        if 'горячая' not in already:
-            result['last_hot'] = hot_val
-        if len(already) == 2:
-            result.pop('last_submitted_at')
+        if all_already_submitted:
+            _LOGGER.info("Показания за текущий период уже внесены на портале")
+        else:
+            _LOGGER.info("Отправлены показания %d счётчиков", len(readings) - len(already))
+            result["last_submitted_at"] = dt_util.now()
+        for label, key in (("холодная", "last_cold"), ("горячая", "last_hot")):
+            if outcomes[label]["stage"] == "submitted":
+                result[key] = outcomes[label]["value"]
         return result
 
     async def _async_update_data(self) -> dict[str, Any]:

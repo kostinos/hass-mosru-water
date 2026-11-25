@@ -197,17 +197,16 @@ class MosRuWaterSubmitAvailableSensor(CoordinatorEntity[MosRuWaterCoordinator], 
     @property
     def native_value(self) -> str:
         data = self.coordinator.data or {}
-        cold_ro = data.get("cold_readonly", True)
-        hot_ro  = data.get("hot_readonly", True)
-        if not cold_ro and not hot_ro:
+        readonly = {
+            "холодная": data.get("cold_readonly", True),
+            "горячая": data.get("hot_readonly", True),
+            **{f"ID {meter_id}": blocked for meter_id, blocked in data.get("extra_readonly", {}).items()},
+        }
+        blocked = [label for label, is_readonly in readonly.items() if is_readonly]
+        if not blocked:
             return "да"
-        if cold_ro and hot_ro:
+        if len(blocked) == len(readonly):
             return "нет"
-        blocked = []
-        if cold_ro:
-            blocked.append("холодная")
-        if hot_ro:
-            blocked.append("горячая")
         return f"частично (заблокирована: {', '.join(blocked)})"
 
     @property
@@ -215,5 +214,6 @@ class MosRuWaterSubmitAvailableSensor(CoordinatorEntity[MosRuWaterCoordinator], 
         data = self.coordinator.data or {}
         return {
             "cold_readonly": data.get("cold_readonly"),
-            "hot_readonly":  data.get("hot_readonly"),
+            "hot_readonly": data.get("hot_readonly"),
+            **({"extra_readonly": data["extra_readonly"]} if data.get("extra_readonly") else {}),
         }

@@ -33,14 +33,18 @@ def load_flow_methods():
              "async_step_qr", "async_step_code", "async_step_totp", "_async_submit_code",
              "async_step_delivery", "async_step_request_sms",
              "async_step_user", "async_step_place", "_load_places", "_async_select_place",
-             "async_step_discover", "async_step_sensors"}
+             "async_step_discover", "async_step_sensors", "async_step_meter_sources",
+             "async_step_qr_retry"}
     names.update({'_async_cleanup_qr', '_qr_finished'})
     cls.bases = []
     cls.keywords = []
     cls.body = [n for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
                 and n.name in names]
     module = ast.Module(body=[ast.ImportFrom(module="__future__", names=[
-        ast.alias(name="annotations")], level=0), cls], type_ignores=[])
+        ast.alias(name="annotations")], level=0), *[
+            node for node in tree.body if isinstance(node, ast.FunctionDef)
+            and node.name in {"_meter_fields", "_meter_source_schema", "_read_meter_sources"}
+        ], cls], type_ignores=[])
     required_calls = []
 
     def required(key, **kw):
@@ -57,7 +61,7 @@ def load_flow_methods():
         "CONF_USER_PLACE_ID": "user_place_id",
         "CONF_COLD_ID": "cold_counter_id", "CONF_HOT_ID": "hot_counter_id",
         "CONF_COLD_ENTITY": "cold_entity", "CONF_HOT_ENTITY": "hot_entity",
-        "CONF_SUBMIT_DAY": "submit_day",
+        "CONF_SUBMIT_DAY": "submit_day", "CONF_EXTRA_METERS": "extra_meters",
         "_validate_sensor": lambda hass, entity_id: None,
         "pick_counters": api.pick_counters,
         "counters_of_type": api.counters_of_type,
@@ -139,17 +143,36 @@ class ReauthTest(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("вкладке](/local/", rendered)
                 self.assertNotIn("tab](/local/", rendered)
 
-    async def test_refresh_updates_notification_link(self):
+    async def test_expired_qr_shows_retry_and_restarts_only_on_submit(self):
         self.flow._client = Mock()
-        self.flow._client.poll_qr.side_effect = ["needRefresh", "needComplete"]
-        self.flow._client.refresh_qr.return_value = {
-            "link": "https://login.mos.ru/qr/mm/?code=new-session"}
-        self.flow._client.complete_qr_auth.return_value = "done"
-        self.flow._qr_link = "https://login.mos.ru/qr/mm/?code=old-session"
-        await self.flow._poll_qr_scan()
-        message = self.ns["pn_create"].call_args.kwargs["message"]
-        self.assertIn("?code=new-session", message)
-        self.assertNotIn("?code=old-session", message)
+        self.flow._client.poll_qr.return_value = "needRefresh"
+        self.assertEqual(await self.flow._poll_qr_scan(), "qr_expired")
+        self.flow._qr_task = asyncio.get_running_loop().create_future()
+        self.flow._qr_task.set_result("qr_expired")
+        self.flow.async_show_progress_done = Mock()
+        await self.flow.async_step_qr()
+        self.flow.async_show_progress_done.assert_called_once_with(next_step_id="qr_retry")
+        self.ns["pn_dismiss"].assert_called_once()
+        self.ns["MosRuClient"].assert_not_called()
+        await self.flow.async_step_qr_retry()
+        self.assertEqual(self.flow.async_show_form.call_args.kwargs["step_id"], "qr_retry")
+        self.flow.async_step_qr = AsyncMock()
+        await self.flow.async_step_qr_retry({})
+        self.ns["MosRuClient"].assert_called_once()
+        self.flow.async_step_qr.assert_awaited_once()
+
+    async def test_unconfirmed_qr_poll_reaches_retry(self):
+        self.flow._client = Mock()
+        self.flow._client.poll_qr.return_value = "askForConfirm"
+        self.assertEqual(await self.flow._poll_qr_scan(), "qr_expired")
+        self.flow._client.complete_qr_auth.assert_not_called()
+
+    async def test_qr_poll_error_does_not_start_another_session(self):
+        self.flow._qr_task = asyncio.get_running_loop().create_future()
+        self.flow._qr_task.set_result(False)
+        await self.flow.async_step_qr()
+        self.flow.async_abort.assert_called_once_with(reason="cannot_connect")
+        self.ns["MosRuClient"].assert_not_called()
 
     async def test_2fa_notification_keeps_link_to_continue_authorization(self):
         self.flow._qr_task = asyncio.get_running_loop().create_future()
