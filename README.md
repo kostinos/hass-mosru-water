@@ -1,6 +1,6 @@
 # MOS.RU Water Meter
 
-HACS-интеграция для Home Assistant: автоматически передаёт показания счётчиков воды на портал mos.ru в заданный день месяца.
+Пользовательская интеграция для Home Assistant: автоматически передаёт показания счётчиков воды на портал mos.ru в заданный день месяца.
 
 Авторизация выполняется через QR-код — пароль вводить не нужно. Показания берутся из любых сенсоров Home Assistant с единицей измерения `м³`.
 
@@ -18,16 +18,32 @@ HACS-интеграция для Home Assistant: автоматически пе
 - Уведомление о необходимости повторной авторизации при истечении сессии
 - Выход и повторный QR-вход без удаления интеграции и её настроек (с версии `2026.9.10`)
 
-## Установка через HACS
+<!-- ha-marketplace:exclude-start -->
+## Установка
 
-1. В HACS → **Custom repositories** добавьте:
-   - URL: `https://github.com/kostinos/hass-mosru-water`
-   - Category: `Integration`
-2. Найдите **MOS.RU Water Meter** в HACS и установите
-3. Перезапустите Home Assistant
-4. Настройки → Устройства и службы → **Добавить интеграцию** → `MOS.RU Water Meter`
+[Открыть MOS.RU Water Meter в Home Assistant](https://my.home-assistant.io/redirect/hacs_repository/?owner=kostinos&repository=hass-mosru-water&category=integration)
+
+Ссылка открывает Marketplace в Home Assistant 2026.11 и новее, а в более ранних версиях — HACS, если он установлен.
+
+### Home Assistant 2026.11 и новее: Marketplace
+
+1. Откройте **Настройки → Marketplace → Добавить по ссылке** (**Add from link**).
+2. Вставьте `https://github.com/kostinos/hass-mosru-water`. Если Marketplace попросит подключить GitHub, подключите его. Если потребуется выбрать тип, укажите **Интеграция**.
+3. Откройте **MOS.RU Water Meter** и нажмите **Установить**. Если Home Assistant попросит перезапуск, перезапустите его.
+
+Если интеграция уже установлена через HACS, при обновлении Home Assistant перенесёт её в Marketplace автоматически. Переустанавливать интеграцию не нужно. [Подробнее о переходе с HACS](https://www.home-assistant.io/integrations/marketplace/#coming-from-hacs).
+
+### Home Assistant до 2026.11: HACS
+
+1. В HACS → **Custom repositories** добавьте `https://github.com/kostinos/hass-mosru-water` с категорией **Integration**.
+2. Найдите **MOS.RU Water Meter** в HACS и установите.
+3. Перезапустите Home Assistant.
+
+<!-- ha-marketplace:exclude-end -->
 
 ## Настройка
+
+После установки откройте **Настройки → Устройства и службы → Добавить интеграцию** и выберите **MOS.RU Water Meter**.
 
 ### Шаг 1 — QR-авторизация
 В интерфейсе HA отобразится QR-код. Откройте приложение **mos.ru** или **Госуслуги Москвы**, нажмите кнопку сканирования QR и направьте камеру на экран. После сканирования авторизация завершится автоматически.
